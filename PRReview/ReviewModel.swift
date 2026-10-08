@@ -10,6 +10,7 @@ final class ReviewModel: ObservableObject {
     @Published var error: String?
     @Published var selected: UUID?
     @Published var removal: Session?
+    @Published var editingRepository: Repository?
     let service = ReviewService()
     init() {
         do { state = try service.load() } catch { self.error = "保存状態を読み込めませんでした。\n\(error.localizedDescription)" }
@@ -61,6 +62,18 @@ final class ReviewModel: ObservableObject {
                 self.open(session)
             }
         } catch { self.error = error.localizedDescription }
+    }
+    func saveCopies(_ repository: Repository, paths: [String]) {
+        perform("コピー設定を確認中…", operation: { try self.service.configureCopies(repository, paths: paths) }) { configured in
+            var next = self.state
+            guard let index = next.repositories.firstIndex(where: { $0.id == repository.id }) else {
+                throw ReviewError("登録リポジトリが変更されています。設定を開き直してください。")
+            }
+            next.repositories[index] = configured
+            try self.service.save(next); self.state = next
+            self.editingRepository = nil
+            self.activity = "コピー設定を保存しました。次のレビュー環境から適用します。"
+        }
     }
     func open(_ session: Session) {
         do {

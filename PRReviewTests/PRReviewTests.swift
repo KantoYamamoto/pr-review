@@ -266,4 +266,177 @@ final class PRReviewTests: XCTestCase {
         XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
         XCTAssertEqual(try service.load().sessions.first, session)
     }
+
+    func writeConfig(_ relative: String, root: String, content: String = "test configuration") throws -> URL {
+        let file = URL(fileURLWithPath: root).appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(content.utf8).write(to: file)
+        return file
+    }
+
+    func copyFixture() throws -> (URL, ReviewService, Session) {
+        let (directory, original, initial) = try fixture()
+        let path = "ignored/GoogleService-Info.plist"
+        _ = try writeConfig(path, root: initial.repository.path)
+        let repository = try original.configureCopies(initial.repository, paths: [path])
+        let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
+        let session = try service.create(PullRequest(initial.prURL), repository: repository)
+        var state = try service.load(); state.sessions = [session]; state.repositories = [repository]
+        try service.save(state)
+        return (directory, service, session)
+    }
+
+    func testLegacyStateDecodesWithoutCopySettings() throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var state = SavedState(); state.sessions = [session]; state.repositories = [session.repository]
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? [String: Any])
+        var repos = try XCTUnwrap(json["repositories"] as? [[String: Any]])
+        repos[0].removeValue(forKey: "copyPaths"); json["repositories"] = repos
+        var sessions = try XCTUnwrap(json["sessions"] as? [[String: Any]])
+        sessions[0].removeValue(forKey: "copiedFiles")
+        var repo = try XCTUnwrap(sessions[0]["repository"] as? [String: Any])
+        repo.removeValue(forKey: "copyPaths"); sessions[0]["repository"] = repo; json["sessions"] = sessions
+        let decoded = try JSONDecoder().decode(SavedState.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(decoded.repositories[0].copyPaths)
+        XCTAssertNil(decoded.sessions[0].copiedFiles)
+        XCTAssertEqual(try service.inspect(decoded.sessions[0]), "")
+    }
+
+    func testCopyConfigurationRejectsTrackedUnsafeDirectoryAndSymlinkPaths() throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repo = session.repository
+        _ = try writeConfig("ignored/valid.xcconfig", root: repo.path)
+        let outside = try writeConfig("outside", root: directory.path)
+        try FileManager.default.createSymbolicLink(atPath: repo.path + "/ignored/link", withDestinationPath: outside.path)
+        try FileManager.default.createSymbolicLink(atPath: repo.path + "/ignored/broken", withDestinationPath: directory.path + "/missing")
+        for path in ["tracked.txt", "../outside", outside.path, ".git/config", "ignored/../valid.xcconfig", "ignored//valid.xcconfig", "ignored", "ignored/link", "ignored/broken"] {
+            XCTAssertThrowsError(try service.configureCopies(repo, paths: [path]), path)
+        }
+        let configured = try service.configureCopies(repo, paths: ["ignored/valid.xcconfig", "ignored/valid.xcconfig"])
+        XCTAssertEqual(configured.copyPaths, ["ignored/valid.xcconfig"])
+        XCTAssertThrowsError(try service.relativeCopyPath(outside, repository: repo))
+    }
+
+    func testCreationCopiesIgnoredConfigsWithPrivatePermissionsAndSafeCleanup() throws {
+        let (directory, service, session) = try copyFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let relative = "ignored/GoogleService-Info.plist"
+        let copy = URL(fileURLWithPath: session.path).appendingPathComponent(relative)
+        let source = URL(fileURLWithPath: session.repository.path).appendingPathComponent(relative)
+        XCTAssertEqual(try String(contentsOf: copy), "test configuration")
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: copy.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        XCTAssertEqual(session.copiedFiles?.count, 1)
+        XCTAssertEqual(session.copiedFiles?.first?.sha256.count, 64)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(session), as: UTF8.self).contains("test configuration"))
+        XCTAssertEqual(try service.load().sessions.first, session)
+        try Data("changed source".utf8).write(to: source)
+        XCTAssertEqual(try service.inspect(session), "")
+        try service.remove(session)
+        XCTAssertEqual(try String(contentsOf: source), "changed source")
+    }
+
+    func testEditedCopiesBlockUpdateAndRemovalAfterReload() throws {
+        let (directory, service, session) = try copyFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copy = URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")
+        try Data("edited locally".utf8).write(to: copy)
+        let loaded = try XCTUnwrap(service.load().sessions.first)
+        XCTAssertTrue(try service.inspect(loaded).contains("コピーしたファイルが変更されています"))
+        XCTAssertThrowsError(try service.update(loaded))
+        XCTAssertThrowsError(try service.remove(loaded))
+        XCTAssertEqual(try String(contentsOf: copy), "edited locally")
+        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+        try FileManager.default.removeItem(at: copy)
+        XCTAssertEqual(try service.inspect(loaded), "")
+        try service.remove(loaded)
+    }
+
+    func testCopySymlinkReplacementIsProtected() throws {
+        let (directory, service, session) = try copyFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copy = URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")
+        let outside = try writeConfig("outside-config", root: directory.path, content: "keep outside")
+        try FileManager.default.removeItem(at: copy)
+        try FileManager.default.createSymbolicLink(atPath: copy.path, withDestinationPath: outside.path)
+        XCTAssertThrowsError(try service.remove(session))
+        XCTAssertThrowsError(try service.update(session))
+        XCTAssertEqual(try String(contentsOf: outside), "keep outside")
+    }
+
+    func testUpdatePreservesCopiesWhenIgnoreRuleDisappears() throws {
+        let (directory, service, session) = try copyFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = session.repository.path
+        try Data("".utf8).write(to: URL(fileURLWithPath: root).appendingPathComponent(".gitignore"))
+        _ = try Commands.git(root, ["commit", "-am", "remove ignore rule"])
+        let sha = try Commands.git(root, ["rev-parse", "HEAD"])
+        _ = try Commands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
+        let updatedService = ReviewService(storage: service.storage, command: { name, args in
+            if name == "gh" { return "{\"title\":\"Updated\",\"headRefOid\":\"\(sha)\"}" }
+            if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
+            return try Commands.run(name, args)
+        })
+        let updated = try updatedService.update(session)
+        XCTAssertEqual(updated.copiedFiles, session.copiedFiles)
+        XCTAssertEqual(updated.sha, sha)
+        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")), "test configuration")
+        XCTAssertEqual(try updatedService.inspect(updated), "")
+        try updatedService.remove(updated)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/ignored/GoogleService-Info.plist"))
+    }
+
+    func testUpdateStopsBeforePRTracksCopyOrReplacesItsParentWithSymlink() throws {
+        for symlink in [false, true] {
+            let (directory, service, session) = try copyFixture()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let root = session.repository.path
+            if symlink {
+                try FileManager.default.removeItem(atPath: root + "/ignored")
+                try FileManager.default.createSymbolicLink(atPath: root + "/ignored", withDestinationPath: "other-directory")
+                _ = try Commands.git(root, ["add", "-f", "ignored"])
+            } else {
+                _ = try Commands.git(root, ["add", "-f", "ignored/GoogleService-Info.plist"])
+            }
+            _ = try Commands.git(root, ["commit", "-m", "PR collision"])
+            let sha = try Commands.git(root, ["rev-parse", "HEAD"])
+            _ = try Commands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
+            let updatedService = ReviewService(storage: service.storage, command: { name, args in
+                if name == "gh" { return "{\"title\":\"Collision\",\"headRefOid\":\"\(sha)\"}" }
+                if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
+                return try Commands.run(name, args)
+            })
+            XCTAssertThrowsError(try updatedService.update(session))
+            XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+            XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")), "test configuration")
+            XCTAssertEqual(try updatedService.load().sessions.first, session)
+        }
+    }
+
+    func testCreationFailureDoesNotLeaveNewWorktreeWhenPRDoesNotIgnoreCopy() throws {
+        let (directory, original, initial) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // The user's local ignore rule is not present in the PR snapshot.
+        let source = try writeConfig("local.xcconfig", root: initial.repository.path)
+        try Data("local.xcconfig\n".utf8).write(to: URL(fileURLWithPath: initial.repository.path).appendingPathComponent(".gitignore"))
+        let configured = try original.configureCopies(initial.repository, paths: ["local.xcconfig"])
+        let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
+        let before = try Commands.git(initial.repository.path, ["worktree", "list", "--porcelain"])
+        XCTAssertThrowsError(try service.create(PullRequest(initial.prURL), repository: configured))
+        XCTAssertEqual(try Commands.git(initial.repository.path, ["worktree", "list", "--porcelain"]), before)
+        XCTAssertEqual(try String(contentsOf: source), "test configuration")
+    }
+
+    func testCopyPathsWithWhitespaceAndGitPathspecCharactersAreLiteral() throws {
+        let (directory, original, initial) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let relative = "ignored/ :(glob)* config\nfile.xcconfig "
+        _ = try writeConfig(relative, root: initial.repository.path)
+        let configured = try original.configureCopies(initial.repository, paths: [relative])
+        let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
+        let session = try service.create(PullRequest(initial.prURL), repository: configured)
+        XCTAssertEqual(try service.inspect(session), "")
+        try service.remove(session)
+    }
 }

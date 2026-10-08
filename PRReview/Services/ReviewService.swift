@@ -1,4 +1,6 @@
 import Foundation
+import CryptoKit
+import Darwin
 
 public struct ReviewError: LocalizedError {
     public let message: String
@@ -33,9 +35,15 @@ public struct Repository: Codable, Identifiable, Equatable {
     public var path: String
     public var slug: String
     public var entry: String
-    public init(path: String, slug: String, entry: String) {
-        id = UUID(); self.path = path; self.slug = slug; self.entry = entry
+    public var copyPaths: [String]?
+    public init(path: String, slug: String, entry: String, copyPaths: [String] = []) {
+        id = UUID(); self.path = path; self.slug = slug; self.entry = entry; self.copyPaths = copyPaths
     }
+}
+
+public struct CopiedFile: Codable, Equatable {
+    public var path: String
+    public var sha256: String
 }
 
 public struct Session: Codable, Identifiable, Equatable {
@@ -48,6 +56,7 @@ public struct Session: Codable, Identifiable, Equatable {
     public var path: String
     public var createdAt: Date
     public var updatedAt: Date?
+    public var copiedFiles: [CopiedFile]?
     public init(id: UUID, repository: Repository, prURL: String, number: Int, title: String, sha: String, path: String) {
         self.id = id; self.repository = repository; self.prURL = prURL; self.number = number
         self.title = title; self.sha = sha; self.path = path; self.createdAt = Date()
@@ -93,7 +102,7 @@ public enum Commands {
         guard process.terminationStatus == 0 else {
             throw ReviewError("\(name)が失敗しました（\(process.terminationStatus)）\n\(string.suffix(6000))")
         }
-        return string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return arguments.contains("-z") ? string : string.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public static func git(_ path: String, _ arguments: [String]) throws -> String {
@@ -110,7 +119,9 @@ public struct ReviewService {
         self.command = command
     }
     private func git(_ path: String, _ arguments: [String]) throws -> String {
-        try command("git", ["-c", "core.hooksPath=/dev/null", "-C", path] + arguments)
+        // check-ignore consumes literal filenames and rejects pathspec magic.
+        let literal = arguments.first == "check-ignore" ? [] : ["--literal-pathspecs"]
+        return try command("git", ["-c", "core.hooksPath=/dev/null"] + literal + ["-C", path] + arguments)
     }
     public func load() throws -> SavedState {
         let file = storage.appendingPathComponent("state.json")
@@ -152,12 +163,114 @@ public struct ReviewService {
         return value
     }
     public func create(_ pr: PullRequest, repository: Repository) throws -> Session {
+        let copies = try prepareCopies(repository)
         let id = UUID()
         let latest = try fetchLatest(pr, repository: repository)
         let path = worktrees.appendingPathComponent(id.uuidString).path
         try FileManager.default.createDirectory(at: worktrees, withIntermediateDirectories: true)
         _ = try git(repository.path, ["worktree", "add", "--detach", path, latest.sha])
-        return Session(id: id, repository: repository, prURL: pr.url, number: pr.number, title: latest.title, sha: latest.sha, path: path)
+        var session = Session(id: id, repository: repository, prURL: pr.url, number: pr.number, title: latest.title, sha: latest.sha, path: path)
+        do {
+            // Validate every destination before writing any local configuration.
+            for copy in copies {
+                let destination = try checkedFile(root: path, relative: copy.path)
+                guard !FileManager.default.fileExists(atPath: destination.path) else {
+                    throw ReviewError("PR内にコピー先が存在します：\(copy.path)")
+                }
+                try requireIgnoredUntracked(copy.path, root: path)
+            }
+            for copy in copies {
+                let destination = try checkedFile(root: path, relative: copy.path)
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                _ = try checkedFile(root: path, relative: copy.path)
+                let descriptor = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+                guard descriptor >= 0 else { throw ReviewError("コピー先に安全にファイルを作成できません：\(copy.path)") }
+                let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                do { try handle.write(contentsOf: copy.data); try handle.close() }
+                catch { try? handle.close(); throw error }
+            }
+            session.copiedFiles = copies.map { CopiedFile(path: $0.path, sha256: Self.digest($0.data)) }
+            return session
+        } catch {
+            // Only remove the new worktree if Git agrees it is clean. The source
+            // configuration is never modified, even when creation fails.
+            do { _ = try git(repository.path, ["worktree", "remove", path]) }
+            catch { throw ReviewError("レビュー環境の準備に失敗しました。残った環境を確認してください：\(path)\n\(error.localizedDescription)") }
+            throw error
+        }
+    }
+    public func configureCopies(_ repository: Repository, paths: [String]) throws -> Repository {
+        var configured = repository
+        configured.copyPaths = Array(Set(paths)).sorted()
+        _ = try prepareCopies(configured)
+        return configured
+    }
+    public func relativeCopyPath(_ file: URL, repository: Repository) throws -> String {
+        let root = URL(fileURLWithPath: repository.path).standardizedFileURL
+        let candidate = file.standardizedFileURL
+        guard candidate.path.hasPrefix(root.path + "/") else { throw ReviewError("リポジトリ内のファイルを選んでください。") }
+        let relative = String(candidate.path.dropFirst(root.path.count + 1))
+        _ = try checkedFile(root: root.path, relative: relative)
+        return relative
+    }
+    private func prepareCopies(_ repository: Repository) throws -> [(path: String, data: Data)] {
+        try (repository.copyPaths ?? []).map { path in
+            let file = try checkedFile(root: repository.path, relative: path)
+            try requireIgnoredUntracked(path, root: repository.path)
+            let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else { throw ReviewError("通常のファイルだけをコピーできます：\(path)") }
+            return (path, try Data(contentsOf: file))
+        }
+    }
+    private func requireIgnoredUntracked(_ path: String, root: String) throws {
+        guard try git(root, ["ls-files", "-z", "--", path]).isEmpty else { throw ReviewError("Git管理済みファイルはコピー対象にできません：\(path)") }
+        do { _ = try git(root, ["check-ignore", "--quiet", "--", path]) }
+        catch { throw ReviewError("コピー対象はGitのignore設定に含めてください：\(path)") }
+    }
+    private func checkedFile(root: String, relative: String) throws -> URL {
+        let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
+        guard !relative.isEmpty, !relative.contains("\0"),
+              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.lowercased() != ".git" }) else {
+            throw ReviewError("コピー対象の相対パスが不正です：\(relative)")
+        }
+        var url = URL(fileURLWithPath: root).standardizedFileURL
+        guard url.resolvingSymlinksInPath() == url else { throw ReviewError("コピー元・先のルートがシンボリックリンクです。") }
+        for component in parts {
+            url.appendPathComponent(String(component))
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil {
+                throw ReviewError("シンボリックリンクはコピー対象にできません：\(relative)")
+            }
+        }
+        return url
+    }
+    private static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    private func inspectCopies(_ session: Session) throws -> (unchanged: Set<String>, notes: [String]) {
+        var unchanged = Set<String>(), notes: [String] = []
+        for copy in session.copiedFiles ?? [] {
+            let file = try checkedFile(root: session.path, relative: copy.path)
+            // Missing copies contain no user data to discard. Do not recreate them.
+            guard FileManager.default.fileExists(atPath: file.path) else { continue }
+            let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+            if attributes[.type] as? FileAttributeType == .typeRegular,
+               Self.digest(try Data(contentsOf: file)) == copy.sha256 {
+                unchanged.insert(copy.path)
+            } else {
+                notes.append("コピーしたファイルが変更されています：\(copy.path)\n必要な内容を元のリポジトリ等へ保存してください。")
+            }
+        }
+        return (unchanged, notes)
+    }
+    private func checkCopyCollisions(_ session: Session, sha: String) throws {
+        for copy in session.copiedFiles ?? [] {
+            let parts = copy.path.split(separator: "/")
+            let paths = (1...parts.count).map { parts.prefix($0).joined(separator: "/") }
+            let entries = try git(session.path, ["ls-tree", "-z", sha, "--"] + paths).split(separator: "\0")
+            if entries.contains(where: { !$0.hasPrefix("040000 tree ") }) {
+                throw ReviewError("最新のPRとコピー先が衝突します。更新せず環境を残しました：\(copy.path)")
+            }
+        }
     }
     private func fetchLatest(_ pr: PullRequest, repository: Repository) throws -> (title: String, sha: String) {
         let slug = try Self.githubSlug(git(repository.path, ["remote", "get-url", "origin"]))
@@ -186,6 +299,7 @@ public struct ReviewService {
         updated.sha = latest.sha; updated.title = latest.title
         let changed = latest.sha != session.sha
         if changed {
+            try checkCopyCollisions(session, sha: latest.sha)
             // Never force checkout; ignored files that collide with new tracked files
             // must also be protected. No branch is created or moved.
             _ = try git(session.path, ["checkout", "--detach", "--no-overwrite-ignore", latest.sha])
@@ -218,13 +332,22 @@ public struct ReviewService {
     }
     public func inspect(_ session: Session) throws -> String {
         try validate(session)
-        let status = try git(session.path, ["status", "--porcelain=v1", "--untracked-files=all"])
+        let copies = try inspectCopies(session)
+        let records = try git(session.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).split(separator: "\0")
+        var status: [String] = [], index = 0
+        while index < records.count {
+            let record = String(records[index])
+            let code = String(record.prefix(2)), path = String(record.dropFirst(3))
+            if code != "??" || !copies.unchanged.contains(path) { status.append(record) }
+            if code.contains("R") || code.contains("C") { index += 1 }
+            index += 1
+        }
         let commits = try git(session.path, ["rev-list", "--count", "\(session.sha)..HEAD"])
         let ignoredPaths = try git(session.path, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"])
             .split(separator: "\0").map(String.init)
-        let ignored = ignoredPaths.filter { !Self.isDisposableXcodeState($0) }.joined(separator: "\n")
-        var notes: [String] = []
-        if !status.isEmpty { notes.append("未コミット／未追跡の変更があります：\n\(status.prefix(3000))") }
+        let ignored = ignoredPaths.filter { !Self.isDisposableXcodeState($0) && !copies.unchanged.contains($0) }.joined(separator: "\n")
+        var notes = copies.notes
+        if !status.isEmpty { notes.append("未コミット／未追跡の変更があります：\n\(status.joined(separator: "\n").prefix(3000))") }
         if commits != "0" { notes.append("レビュー中のコミットから追加されたローカルコミットが\(commits)件あります。") }
         if !ignored.isEmpty { notes.append("Git管理外（ignored）のファイルがあります：\n\(ignored.prefix(2000))\n必要なファイルを保存するか、不要な生成物を手動で削除してください。") }
         return notes.joined(separator: "\n\n")
@@ -251,6 +374,15 @@ public struct ReviewService {
     public func remove(_ session: Session) throws {
         let reason = try inspect(session)
         guard reason.isEmpty else { throw ReviewError(reason) }
+        // Copies whose ignore rule was removed by a newer PR are untracked, so
+        // delete only verified copies explicitly before Git's non-force removal.
+        for copy in session.copiedFiles ?? [] {
+            let file = try checkedFile(root: session.path, relative: copy.path)
+            if FileManager.default.fileExists(atPath: file.path) {
+                guard Self.digest(try Data(contentsOf: file)) == copy.sha256 else { throw ReviewError("コピーしたファイルが変更されています：\(copy.path)") }
+                try FileManager.default.removeItem(at: file)
+            }
+        }
         _ = try git(session.repository.path, ["worktree", "remove", session.path])
     }
 }
