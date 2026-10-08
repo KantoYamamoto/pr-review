@@ -23,7 +23,13 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("登録リポジトリ").font(.caption.bold()).foregroundStyle(.secondary)
                     ForEach(model.state.repositories) { repo in
-                        Text(repo.slug).font(.caption).lineLimit(1)
+                        HStack {
+                            Text(repo.slug).font(.caption).lineLimit(1)
+                            Spacer()
+                            Button { model.editingRepository = repo } label: { Image(systemName: "doc.on.doc") }
+                                .help("コピーするファイルを設定").disabled(model.busy)
+                                .accessibilityLabel("\(repo.slug)のコピー設定")
+                        }
                     }
                     Button("リポジトリ登録", systemImage: "folder.badge.plus") { model.addRepository() }
                         .padding(.top, 5).disabled(model.busy)
@@ -50,6 +56,10 @@ struct ContentView: View {
                         Label("レビュー中のコミット: \(session.sha.prefix(10))", systemImage: "point.3.connected.trianglepath.dotted")
                             .font(.callout).foregroundStyle(.secondary)
                         Text("作成: \(session.createdAt.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                        if !(session.copiedFiles ?? []).isEmpty {
+                            Text("コピーした設定: \(session.copiedFiles?.count ?? 0)ファイル（変更があれば保護します）")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         if let updatedAt = session.updatedAt {
                             Text("最終更新: \(updatedAt.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
                         }
@@ -69,7 +79,7 @@ struct ContentView: View {
                         Spacer()
                         VStack(alignment: .leading, spacing: 10) {
                             Text("レビューが終わったら").font(.headline)
-                            Text("Xcodeのこのプロジェクトを閉じてから終了してください。未保存の編集は先に保存してください。Xcodeの画面状態・scheme管理ファイルは片付けます。それ以外の変更・ローカルコミット・ignoredファイルがある環境は残します。")
+                            Text("Xcodeのこのプロジェクトを閉じてから終了してください。未保存の編集は先に保存してください。未変更のコピー設定とXcodeの画面状態は片付けます。編集した設定やその他の変更があれば環境を残します。")
                                 .font(.callout).foregroundStyle(.secondary)
                             Button("レビュー終了…", systemImage: "checkmark.circle") { model.checkRemoval(session) }.disabled(model.busy)
                         }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
@@ -85,6 +95,9 @@ struct ContentView: View {
                 }
             }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .sheet(item: $model.editingRepository) { repository in
+            CopySettingsView(model: model, repository: repository)
+        }
         .alert("確認", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("閉じる") { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -94,7 +107,61 @@ struct ContentView: View {
                 if let session = model.removal { model.removal = nil; model.remove(session) }
             }
         } message: {
-            Text("このPR用のworktreeと、Xcodeが生成した画面状態・scheme管理ファイルを削除します。Xcodeの該当プロジェクトを閉じ、未保存の編集がないことを確認してください。普段の作業環境は残ります。")
+            Text("このPR用のworktree、コピー時から変わっていない設定ファイル、Xcodeの画面状態を削除します。Xcodeの該当プロジェクトを閉じ、未保存の編集がないことを確認してください。元のファイルは残ります。")
         }
+    }
+}
+
+struct CopySettingsView: View {
+    @ObservedObject var model: ReviewModel
+    let repository: Repository
+    @State private var paths: [String]
+    @State private var error: String?
+    init(model: ReviewModel, repository: Repository) {
+        self.model = model; self.repository = repository
+        _paths = State(initialValue: repository.copyPaths ?? [])
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("レビュー環境にコピーするファイル").font(.title2.bold())
+            Text(repository.slug).foregroundStyle(.secondary)
+            Text("GitでignoreされているFirebase設定や.xcconfigを選択します。同じ相対パスへコピーし、変更がなければレビュー終了時に片付けます。設定は新しく作るレビュー環境に適用されます。")
+                .font(.callout).foregroundStyle(.secondary)
+            List {
+                ForEach(paths, id: \.self) { path in
+                    HStack {
+                        Text(path).font(.callout.monospaced())
+                        Spacer()
+                        Button { paths.removeAll { $0 == path } } label: { Image(systemName: "minus.circle") }
+                            .accessibilityLabel("\(path)をコピー対象から外す")
+                    }
+                }
+            }.disabled(model.busy)
+                .overlay { if paths.isEmpty { Text("コピー対象は未設定です").foregroundStyle(.secondary) } }
+            if let error { Text(error).foregroundStyle(.red).font(.caption) }
+            HStack {
+                Button("ファイルを追加…", systemImage: "plus") { chooseFiles() }
+                Spacer()
+                Button("キャンセル") { model.editingRepository = nil }
+                Button("保存") {
+                    error = nil
+                    model.saveCopies(repository, paths: paths) { error = $0 }
+                }.buttonStyle(.borderedProminent)
+            }.disabled(model.busy)
+        }.padding(24).frame(width: 580, height: 460)
+            .interactiveDismissDisabled(model.busy)
+    }
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.message = "リポジトリ内のignoreされている設定ファイルを選択"
+        panel.directoryURL = URL(fileURLWithPath: repository.path)
+        panel.canChooseDirectories = false; panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true; panel.showsHiddenFiles = true
+        panel.treatsFilePackagesAsDirectories = true
+        guard panel.runModal() == .OK else { return }
+        do {
+            let added = try panel.urls.map { try model.service.relativeCopyPath($0, repository: repository) }
+            paths = Array(Set(paths + added)).sorted(); error = nil
+        } catch { self.error = error.localizedDescription }
     }
 }

@@ -10,19 +10,23 @@ final class ReviewModel: ObservableObject {
     @Published var error: String?
     @Published var selected: UUID?
     @Published var removal: Session?
+    @Published var editingRepository: Repository?
     let service = ReviewService()
     init() {
         do { state = try service.load() } catch { self.error = "保存状態を読み込めませんでした。\n\(error.localizedDescription)" }
     }
     var session: Session? { state.sessions.first { $0.id == selected } }
-    func perform<T>(_ label: String, operation: @escaping () throws -> T, completion: @escaping (T) throws -> Void) {
+    func perform<T>(_ label: String, operation: @escaping () throws -> T, failure: ((Error) -> Void)? = nil, completion: @escaping (T) throws -> Void) {
         guard !busy else { return }
         busy = true; activity = label
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) { try operation() }.value
                 try completion(result)
-            } catch { self.error = error.localizedDescription; activity = "操作を完了できませんでした。" }
+            } catch {
+                if let failure { failure(error) } else { self.error = error.localizedDescription }
+                activity = "操作を完了できませんでした。"
+            }
             busy = false
         }
     }
@@ -61,6 +65,18 @@ final class ReviewModel: ObservableObject {
                 self.open(session)
             }
         } catch { self.error = error.localizedDescription }
+    }
+    func saveCopies(_ repository: Repository, paths: [String], onError: @escaping (String) -> Void) {
+        perform("コピー設定を確認中…", operation: { try self.service.configureCopies(repository, paths: paths) }, failure: { onError($0.localizedDescription) }) { configured in
+            var next = self.state
+            guard let index = next.repositories.firstIndex(where: { $0.id == repository.id }) else {
+                throw ReviewError("登録リポジトリが変更されています。設定を開き直してください。")
+            }
+            next.repositories[index] = configured
+            try self.service.save(next); self.state = next
+            self.editingRepository = nil
+            self.activity = "コピー設定を保存しました。次のレビュー環境から適用します。"
+        }
     }
     func open(_ session: Session) {
         do {
