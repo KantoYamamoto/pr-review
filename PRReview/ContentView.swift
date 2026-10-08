@@ -136,13 +136,17 @@ struct CopySettingsView: View {
                             .accessibilityLabel("\(path)をコピー対象から外す")
                     }
                 }
-            }.overlay { if paths.isEmpty { Text("コピー対象は未設定です").foregroundStyle(.secondary) } }
+            }.disabled(model.busy)
+                .overlay { if paths.isEmpty { Text("コピー対象は未設定です").foregroundStyle(.secondary) } }
             if let error { Text(error).foregroundStyle(.red).font(.caption) }
             HStack {
                 Button("ファイルを追加…", systemImage: "plus") { chooseFiles() }
                 Spacer()
                 Button("キャンセル") { model.editingRepository = nil }
-                Button("保存") { model.saveCopies(repository, paths: paths) }.buttonStyle(.borderedProminent)
+                Button("保存") {
+                    error = nil
+                    model.saveCopies(repository, paths: paths) { error = $0 }
+                }.buttonStyle(.borderedProminent)
             }.disabled(model.busy)
         }.padding(24).frame(width: 580, height: 460)
             .interactiveDismissDisabled(model.busy)

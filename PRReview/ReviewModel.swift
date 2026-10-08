@@ -16,14 +16,17 @@ final class ReviewModel: ObservableObject {
         do { state = try service.load() } catch { self.error = "保存状態を読み込めませんでした。\n\(error.localizedDescription)" }
     }
     var session: Session? { state.sessions.first { $0.id == selected } }
-    func perform<T>(_ label: String, operation: @escaping () throws -> T, completion: @escaping (T) throws -> Void) {
+    func perform<T>(_ label: String, operation: @escaping () throws -> T, failure: ((Error) -> Void)? = nil, completion: @escaping (T) throws -> Void) {
         guard !busy else { return }
         busy = true; activity = label
         Task {
             do {
                 let result = try await Task.detached(priority: .userInitiated) { try operation() }.value
                 try completion(result)
-            } catch { self.error = error.localizedDescription; activity = "操作を完了できませんでした。" }
+            } catch {
+                if let failure { failure(error) } else { self.error = error.localizedDescription }
+                activity = "操作を完了できませんでした。"
+            }
             busy = false
         }
     }
@@ -63,8 +66,8 @@ final class ReviewModel: ObservableObject {
             }
         } catch { self.error = error.localizedDescription }
     }
-    func saveCopies(_ repository: Repository, paths: [String]) {
-        perform("コピー設定を確認中…", operation: { try self.service.configureCopies(repository, paths: paths) }) { configured in
+    func saveCopies(_ repository: Repository, paths: [String], onError: @escaping (String) -> Void) {
+        perform("コピー設定を確認中…", operation: { try self.service.configureCopies(repository, paths: paths) }, failure: { onError($0.localizedDescription) }) { configured in
             var next = self.state
             guard let index = next.repositories.firstIndex(where: { $0.id == repository.id }) else {
                 throw ReviewError("登録リポジトリが変更されています。設定を開き直してください。")

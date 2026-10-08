@@ -374,15 +374,42 @@ public struct ReviewService {
     public func remove(_ session: Session) throws {
         let reason = try inspect(session)
         guard reason.isEmpty else { throw ReviewError(reason) }
-        // Copies whose ignore rule was removed by a newer PR are untracked, so
-        // delete only verified copies explicitly before Git's non-force removal.
-        for copy in session.copiedFiles ?? [] {
-            let file = try checkedFile(root: session.path, relative: copy.path)
-            if FileManager.default.fileExists(atPath: file.path) {
+        // Git can remove ignored copies itself. Copies whose ignore rule changed
+        // are temporarily moved aside so non-force removal still checks all other
+        // user files. Restore them if Git refuses (e.g. a locked worktree).
+        let backup = storage.appendingPathComponent("CopyRemovalBackups/\(UUID().uuidString)")
+        var moved: [(original: URL, backup: URL)] = []
+        do {
+            for copy in session.copiedFiles ?? [] {
+                let file = try checkedFile(root: session.path, relative: copy.path)
+                guard FileManager.default.fileExists(atPath: file.path) else { continue }
                 guard Self.digest(try Data(contentsOf: file)) == copy.sha256 else { throw ReviewError("コピーしたファイルが変更されています：\(copy.path)") }
-                try FileManager.default.removeItem(at: file)
+                if (try? git(session.path, ["check-ignore", "--quiet", "--", copy.path])) != nil { continue }
+                try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                let saved = try checkedFile(root: backup.path, relative: copy.path)
+                try FileManager.default.createDirectory(at: saved.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try FileManager.default.moveItem(at: file, to: saved)
+                moved.append((file, saved))
+                guard Self.digest(try Data(contentsOf: saved)) == copy.sha256 else { throw ReviewError("コピーしたファイルが変更されています：\(copy.path)") }
             }
+            _ = try git(session.repository.path, ["worktree", "remove", session.path])
+        } catch {
+            let originalError = error
+            var restorationFailed = false
+            for pair in moved.reversed() {
+                do {
+                    guard FileManager.default.fileExists(atPath: session.path + "/.git") else { throw ReviewError("worktreeがありません。") }
+                    let relative = String(pair.original.path.dropFirst(session.path.count + 1))
+                    _ = try checkedFile(root: session.path, relative: relative)
+                    try FileManager.default.moveItem(at: pair.backup, to: pair.original)
+                } catch { restorationFailed = true }
+            }
+            if restorationFailed {
+                throw ReviewError("環境の削除に失敗しました。復元できなかったコピー設定は次の場所に保管しました：\(backup.path)\n\(originalError.localizedDescription)")
+            }
+            try? FileManager.default.removeItem(at: backup)
+            throw originalError
         }
-        _ = try git(session.repository.path, ["worktree", "remove", session.path])
+        try? FileManager.default.removeItem(at: backup)
     }
 }

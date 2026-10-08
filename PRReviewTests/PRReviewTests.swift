@@ -439,4 +439,38 @@ final class PRReviewTests: XCTestCase {
         XCTAssertEqual(try service.inspect(session), "")
         try service.remove(session)
     }
+
+    func testLockedRemovalPreservesCopiesEvenWhenSourceIsGone() throws {
+        for losesIgnoreRule in [false, true] {
+            let (directory, service, initial) = try copyFixture()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var session = initial
+            var removalService = service
+            let root = initial.repository.path
+            if losesIgnoreRule {
+                try Data("".utf8).write(to: URL(fileURLWithPath: root).appendingPathComponent(".gitignore"))
+                _ = try Commands.git(root, ["commit", "-am", "remove ignore rule"])
+                let sha = try Commands.git(root, ["rev-parse", "HEAD"])
+                _ = try Commands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
+                removalService = ReviewService(storage: service.storage, command: { name, args in
+                    if name == "gh" { return "{\"title\":\"Updated\",\"headRefOid\":\"\(sha)\"}" }
+                    if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
+                    return try Commands.run(name, args)
+                })
+                session = try removalService.update(initial)
+            }
+            let relative = "ignored/GoogleService-Info.plist"
+            let copy = URL(fileURLWithPath: session.path).appendingPathComponent(relative)
+            try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: copy.path)
+            try FileManager.default.removeItem(atPath: root + "/" + relative)
+            _ = try Commands.git(root, ["worktree", "lock", session.path])
+            XCTAssertThrowsError(try removalService.remove(session))
+            XCTAssertEqual(try String(contentsOf: copy), "test configuration")
+            XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: copy.path)[.posixPermissions] as? NSNumber)?.intValue, 0o640)
+            XCTAssertEqual(try removalService.load().sessions.first, session)
+            XCTAssertEqual(try removalService.inspect(session), "")
+            _ = try Commands.git(root, ["worktree", "unlock", session.path])
+            try removalService.remove(session)
+        }
+    }
 }
