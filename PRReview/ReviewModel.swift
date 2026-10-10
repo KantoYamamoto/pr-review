@@ -1,6 +1,12 @@
 import SwiftUI
 import AppKit
 
+struct ProjectSelection: Identifiable {
+    let id = UUID()
+    let root: String
+    let entries: [String]
+}
+
 @MainActor
 final class ReviewModel: ObservableObject {
     @Published var state = SavedState()
@@ -11,6 +17,8 @@ final class ReviewModel: ObservableObject {
     @Published var selected: UUID?
     @Published var removal: Session?
     @Published var editingRepository: Repository?
+    @Published var projectSelection: ProjectSelection?
+    @Published var projectSelectionError: String?
     let service = ReviewService()
     init() {
         do { state = try service.load() } catch { self.error = "保存状態を読み込めませんでした。\n\(error.localizedDescription)" }
@@ -35,17 +43,46 @@ final class ReviewModel: ObservableObject {
         folder.message = "普段使っているローカルのGitリポジトリを選択"
         folder.canChooseDirectories = true; folder.canChooseFiles = false; folder.allowsMultipleSelection = false
         guard folder.runModal() == .OK, let root = folder.url else { return }
+        perform("Xcodeプロジェクトを検索中…", operation: { try self.service.discoverProjects(path: root.path) }) { result in
+            if result.entries.count == 1 {
+                self.registerRepository(root: result.root, entry: result.entries[0])
+            } else if result.entries.isEmpty {
+                self.chooseProjectManually(root: result.root)
+            } else {
+                self.projectSelectionError = nil
+                self.projectSelection = ProjectSelection(root: result.root, entries: result.entries)
+                self.activity = "開くXcodeプロジェクトを選んでください。"
+            }
+        }
+    }
+    func chooseProjectManually(root: String) {
         let project = NSOpenPanel()
         project.message = "このリポジトリで開く.xcworkspaceまたは.xcodeprojを選択"
-        project.directoryURL = root; project.canChooseFiles = true; project.canChooseDirectories = true
+        project.directoryURL = URL(fileURLWithPath: root)
+        project.canChooseFiles = true; project.canChooseDirectories = true
         project.treatsFilePackagesAsDirectories = false; project.allowsMultipleSelection = false
         guard project.runModal() == .OK, let entry = project.url else { return }
-        perform("リポジトリを確認中…", operation: { try self.service.register(path: root.path, entryPath: entry.path) }) { repo in
-            var next = self.state
-            next.repositories.removeAll { $0.slug.lowercased() == repo.slug.lowercased() }
-            next.repositories.append(repo)
-            try self.service.save(next); self.state = next
-            self.activity = "\(repo.slug)を登録しました。"
+        registerRepository(root: root, entry: entry.path)
+    }
+    func registerRepository(root: String, entry: String) {
+        // Discovery has finished; defer until perform releases its busy flag.
+        Task { @MainActor in
+            self.perform("リポジトリを確認中…", operation: {
+                let path = entry.hasPrefix("/") ? entry : URL(fileURLWithPath: root).appendingPathComponent(entry).path
+                return try self.service.register(path: root, entryPath: path)
+            }, failure: { error in
+                if self.projectSelection != nil { self.projectSelectionError = error.localizedDescription }
+                else { self.error = error.localizedDescription }
+            }) { repo in
+                var next = self.state
+                if let existing = next.repositories.first(where: { $0.slug.lowercased() == repo.slug.lowercased() }) {
+                    var updated = repo; updated.id = existing.id; updated.copyPaths = existing.copyPaths
+                    next.repositories.removeAll { $0.id == existing.id }; next.repositories.append(updated)
+                } else { next.repositories.append(repo) }
+                try self.service.save(next); self.state = next
+                self.projectSelection = nil
+                self.activity = "\(repo.slug)を登録しました。"
+            }
         }
     }
     func create() {

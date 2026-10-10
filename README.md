@@ -45,7 +45,11 @@ Info.plistはXcodeのビルド設定から自動生成します。
 ## 使い方
 
 1. 「リポジトリ登録」で普段使っているローカルrepoを選ぶ。
-2. そのrepo内で開く `.xcworkspace` または `.xcodeproj` を選ぶ。
+2. repo内の `.xcworkspace` / `.xcodeproj` を自動検出。1件ならそのまま登録し、
+   複数なら相対パスの一覧から選びます（workspaceを先に表示）。候補がない場合は手動選択します。
+   複数候補の一覧からも手動選択できます。Gitのignore対象（未追跡）、Pods / Carthage / node_modules、
+   build / DerivedData / .build、シンボリックリンク、パッケージ内部は検索対象外です。
+   未追跡でもignoreされていないプロジェクトは候補になりますが、PR側にも同じパスが必要です。
 3. `https://github.com/owner/repo/pull/123` を貼り「レビュー開始」。
 4. 専用worktreeが作られ、登録したプロジェクトをXcodeで開く。
 5. 左の一覧から再開。GitHubのPRやFinderにも移動できる。
