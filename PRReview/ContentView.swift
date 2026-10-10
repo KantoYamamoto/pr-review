@@ -95,6 +95,9 @@ struct ContentView: View {
                 }
             }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .sheet(item: $model.projectSelection) { selection in
+            ProjectSelectionView(model: model, selection: selection)
+        }
         .sheet(item: $model.editingRepository) { repository in
             CopySettingsView(model: model, repository: repository)
         }
@@ -163,5 +166,36 @@ struct CopySettingsView: View {
             let added = try panel.urls.map { try model.service.relativeCopyPath($0, repository: repository) }
             paths = Array(Set(paths + added)).sorted(); error = nil
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+struct ProjectSelectionView: View {
+    @ObservedObject var model: ReviewModel
+    let selection: ProjectSelection
+    @State private var selected: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("開くXcodeプロジェクトを選択").font(.headline)
+            Text("複数の候補が見つかりました。workspaceは一覧の先頭に表示します。")
+                .foregroundStyle(.secondary)
+            List(selection: $selected) {
+                ForEach(selection.entries, id: \.self) { entry in
+                    Label(entry, systemImage: entry.hasSuffix(".xcworkspace") ? "square.stack" : "hammer")
+                        .tag(entry)
+                }
+            }.frame(minHeight: 180)
+            if let error = model.projectSelectionError {
+                Text(error).foregroundStyle(.red).textSelection(.enabled)
+            }
+            HStack {
+                Button("手動で選択…") { model.chooseProjectManually(root: selection.root) }
+                Spacer()
+                Button("キャンセル") { model.projectSelection = nil }
+                Button("登録") {
+                    if let selected { model.registerRepository(root: selection.root, entry: selected) }
+                }.buttonStyle(.borderedProminent).disabled(selected == nil)
+            }.disabled(model.busy)
+        }.padding(24).frame(width: 620)
+            .interactiveDismissDisabled(model.busy)
     }
 }

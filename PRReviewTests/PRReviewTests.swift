@@ -2,6 +2,54 @@ import XCTest
 @testable import PRReview
 
 final class PRReviewTests: XCTestCase {
+    func testProjectDiscoveryFiltersAndSortsRealContainers() throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = URL(fileURLWithPath: session.repository.path)
+        _ = try Commands.git(root.path, ["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        func container(_ path: String, marker: String = "project.pbxproj") throws {
+            let folder = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data("test".utf8).write(to: folder.appendingPathComponent(marker))
+        }
+        try container("Z App.xcodeproj")
+        try container("Nested/A.xcodeproj")
+        try container("Review.xcworkspace", marker: "contents.xcworkspacedata")
+        try container("Z App.xcodeproj/project.xcworkspace", marker: "contents.xcworkspacedata")
+        try container("Pods/Dependency.xcodeproj")
+        try container("ignored/Hidden.xcodeproj")
+        try container("build/Generated.xcodeproj")
+        try container("Package.bundle/Embedded.xcodeproj")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Invalid.xcodeproj"), withIntermediateDirectories: true)
+        try Data("fake".utf8).write(to: root.appendingPathComponent("File.xcodeproj"))
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("Linked.xcodeproj").path, withDestinationPath: root.appendingPathComponent("Z App.xcodeproj").path)
+        // A tracked dependency is excluded too, while tracked ordinary projects remain discoverable.
+        _ = try Commands.git(root.path, ["add", "Pods", "Nested"])
+        let found = try service.discoverProjects(path: root.appendingPathComponent("Nested").path)
+        XCTAssertEqual(found.root, root.path)
+        XCTAssertEqual(found.entries, ["Review.xcworkspace", "Nested/A.xcodeproj", "Z App.xcodeproj"])
+        let registered = try service.register(path: root.path, entryPath: root.appendingPathComponent(found.entries[0]).path)
+        XCTAssertEqual(registered.entry, "Review.xcworkspace")
+        for invalid in ["Invalid.xcodeproj", "File.xcodeproj", "Linked.xcodeproj", "Missing.xcodeproj"] {
+            XCTAssertThrowsError(try service.register(path: root.path, entryPath: root.appendingPathComponent(invalid).path))
+        }
+        try FileManager.default.removeItem(at: root.appendingPathComponent("Nested/A.xcodeproj/project.pbxproj"))
+        XCTAssertFalse(try service.discoverProjects(path: root.path).entries.contains("Nested/A.xcodeproj"))
+    }
+
+    func testDiscoveryReturnsNoCandidatesAndRejectsSymlinkMarker() throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = URL(fileURLWithPath: session.repository.path)
+        _ = try Commands.git(root.path, ["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        XCTAssertEqual(try service.discoverProjects(path: root.path).entries, [])
+        let project = root.appendingPathComponent("App.xcodeproj")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: project.appendingPathComponent("project.pbxproj").path, withDestinationPath: root.appendingPathComponent("tracked.txt").path)
+        XCTAssertEqual(try service.discoverProjects(path: root.path).entries, [])
+        XCTAssertThrowsError(try service.register(path: root.path, entryPath: project.path))
+    }
+
     func testSavePreservesCorruptExistingState() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
