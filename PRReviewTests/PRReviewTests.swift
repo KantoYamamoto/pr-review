@@ -1,12 +1,13 @@
 import XCTest
 @testable import PRReview
 
+@MainActor
 final class PRReviewTests: XCTestCase {
-    func testProjectDiscoveryFiltersAndSortsRealContainers() throws {
+    func testProjectDiscoveryFiltersAndSortsRealContainers() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let root = URL(fileURLWithPath: session.repository.path)
-        _ = try Commands.git(root.path, ["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        _ = try TestCommands.git(root.path, ["remote", "add", "origin", "https://github.com/owner/repo.git"])
         func container(_ path: String, marker: String = "project.pbxproj") throws {
             let folder = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -24,33 +25,33 @@ final class PRReviewTests: XCTestCase {
         try Data("fake".utf8).write(to: root.appendingPathComponent("File.xcodeproj"))
         try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("Linked.xcodeproj").path, withDestinationPath: root.appendingPathComponent("Z App.xcodeproj").path)
         // A tracked dependency is excluded too, while tracked ordinary projects remain discoverable.
-        _ = try Commands.git(root.path, ["add", "Pods", "Nested"])
-        let found = try service.discoverProjects(path: root.appendingPathComponent("Nested").path)
-        XCTAssertEqual(found.root, root.path)
-        XCTAssertEqual(found.entries, ["Review.xcworkspace", "Nested/A.xcodeproj", "Z App.xcodeproj"])
-        let registered = try service.register(path: root.path, entryPath: root.appendingPathComponent(found.entries[0]).path)
-        XCTAssertEqual(registered.entry, "Review.xcworkspace")
+        _ = try TestCommands.git(root.path, ["add", "Pods", "Nested"])
+        let found = try await service.discoverProjects(path: root.appendingPathComponent("Nested").path)
+        await expectEqual(found.root, root.path)
+        await expectEqual(found.entries, ["Review.xcworkspace", "Nested/A.xcodeproj", "Z App.xcodeproj"])
+        let registered = try await service.register(path: root.path, entryPath: root.appendingPathComponent(found.entries[0]).path)
+        await expectEqual(registered.entry, "Review.xcworkspace")
         for invalid in ["Invalid.xcodeproj", "File.xcodeproj", "Linked.xcodeproj", "Missing.xcodeproj"] {
-            XCTAssertThrowsError(try service.register(path: root.path, entryPath: root.appendingPathComponent(invalid).path))
+            await expectThrowsError(try await service.register(path: root.path, entryPath: root.appendingPathComponent(invalid).path))
         }
         try FileManager.default.removeItem(at: root.appendingPathComponent("Nested/A.xcodeproj/project.pbxproj"))
-        XCTAssertFalse(try service.discoverProjects(path: root.path).entries.contains("Nested/A.xcodeproj"))
+        await expectFalse(try await service.discoverProjects(path: root.path).entries.contains("Nested/A.xcodeproj"))
     }
 
-    func testDiscoveryReturnsNoCandidatesAndRejectsSymlinkMarker() throws {
+    func testDiscoveryReturnsNoCandidatesAndRejectsSymlinkMarker() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let root = URL(fileURLWithPath: session.repository.path)
-        _ = try Commands.git(root.path, ["remote", "add", "origin", "https://github.com/owner/repo.git"])
-        XCTAssertEqual(try service.discoverProjects(path: root.path).entries, [])
+        _ = try TestCommands.git(root.path, ["remote", "add", "origin", "https://github.com/owner/repo.git"])
+        await expectEqual(try await service.discoverProjects(path: root.path).entries, [])
         let project = root.appendingPathComponent("App.xcodeproj")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: project.appendingPathComponent("project.pbxproj").path, withDestinationPath: root.appendingPathComponent("tracked.txt").path)
-        XCTAssertEqual(try service.discoverProjects(path: root.path).entries, [])
-        XCTAssertThrowsError(try service.register(path: root.path, entryPath: project.path))
+        await expectEqual(try await service.discoverProjects(path: root.path).entries, [])
+        await expectThrowsError(try await service.register(path: root.path, entryPath: project.path))
     }
 
-    func testSavePreservesCorruptExistingState() throws {
+    func testSavePreservesCorruptExistingState() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -58,98 +59,98 @@ final class PRReviewTests: XCTestCase {
         let file = directory.appendingPathComponent("state.json")
         let original = Data("{incomplete saved state".utf8)
         try original.write(to: file)
-        XCTAssertThrowsError(try service.load())
-        XCTAssertThrowsError(try service.save(SavedState()))
-        XCTAssertEqual(try Data(contentsOf: file), original)
+        await expectThrowsError(try service.stateStore.load())
+        await expectThrowsError(try service.stateStore.save(SavedState()))
+        await expectEqual(try Data(contentsOf: file), original)
     }
 
-    func testPRParsing() throws {
+    func testPRParsing() async throws {
         let pr = try PullRequest(" https://github.com/owner/repo/pull/42/files?diff=split ")
-        XCTAssertEqual(pr.url, "https://github.com/owner/repo/pull/42")
+        await expectEqual(pr.url, "https://github.com/owner/repo/pull/42")
         for invalid in ["https://evil.test/a/b/pull/1", "https://github.com/a/b/pull/0", "https://github.com/a/b/issues/1", "file:///tmp/repo", "https://user@github.com/a/b/pull/1"] {
-            XCTAssertThrowsError(try PullRequest(invalid))
+            await expectThrowsError(try PullRequest(invalid))
         }
-        XCTAssertEqual(try ReviewService.githubSlug("git@github.com:owner/repo.git"), "owner/repo")
-        XCTAssertThrowsError(try ReviewService.githubSlug("https://evil.test/owner/repo.git"))
+        await expectEqual(try ReviewService.githubSlug("git@github.com:owner/repo.git"), "owner/repo")
+        await expectThrowsError(try ReviewService.githubSlug("https://evil.test/owner/repo.git"))
     }
 
     func fixture() throws -> (URL, ReviewService, Session) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let repo = directory.appendingPathComponent("repository")
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        _ = try Commands.git(repo.path, ["init"])
-        _ = try Commands.git(repo.path, ["config", "commit.gpgsign", "false"])
-        _ = try Commands.git(repo.path, ["config", "user.name", "Test"])
-        _ = try Commands.git(repo.path, ["config", "user.email", "test@example.invalid"])
+        _ = try TestCommands.git(repo.path, ["init"])
+        _ = try TestCommands.git(repo.path, ["config", "commit.gpgsign", "false"])
+        _ = try TestCommands.git(repo.path, ["config", "user.name", "Test"])
+        _ = try TestCommands.git(repo.path, ["config", "user.email", "test@example.invalid"])
         try Data("initial".utf8).write(to: repo.appendingPathComponent("tracked.txt"))
         try Data("ignored/\n".utf8).write(to: repo.appendingPathComponent(".gitignore"))
-        _ = try Commands.git(repo.path, ["add", "."])
-        _ = try Commands.git(repo.path, ["commit", "-m", "initial"])
-        let sha = try Commands.git(repo.path, ["rev-parse", "HEAD"])
+        _ = try TestCommands.git(repo.path, ["add", "."])
+        _ = try TestCommands.git(repo.path, ["commit", "-m", "initial"])
+        let sha = try TestCommands.git(repo.path, ["rev-parse", "HEAD"])
         let service = ReviewService(storage: directory.appendingPathComponent("state"))
         try FileManager.default.createDirectory(at: service.worktrees, withIntermediateDirectories: true)
         let id = UUID()
         let path = service.worktrees.appendingPathComponent(id.uuidString).path
-        _ = try Commands.git(repo.path, ["worktree", "add", "--detach", path, sha])
+        _ = try TestCommands.git(repo.path, ["worktree", "add", "--detach", path, sha])
         let repository = Repository(path: repo.path, slug: "owner/repo", entry: "App.xcodeproj")
         let session = Session(id: id, repository: repository, prURL: "https://github.com/owner/repo/pull/1", number: 1, title: "Test", sha: sha, path: path)
         return (directory, service, session)
     }
 
-    func testCleanRemovalLeavesMainWorkUntouched() throws {
+    func testCleanRemovalLeavesMainWorkUntouched() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let main = URL(fileURLWithPath: session.repository.path).appendingPathComponent("tracked.txt")
         try Data("unfinished main work".utf8).write(to: main)
-        XCTAssertEqual(try service.inspect(session), "")
+        await expectEqual(try await service.inspect(session).description, "")
         var state = SavedState(); state.sessions = [session]
-        try service.save(state)
-        XCTAssertEqual(try service.load().sessions, [session])
-        try service.remove(session)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: session.path))
-        XCTAssertEqual(try String(contentsOf: main, encoding: .utf8), "unfinished main work")
-        XCTAssertFalse(try Commands.git(session.repository.path, ["worktree", "list", "--porcelain"]).contains(session.path))
+        try service.stateStore.save(state)
+        await expectEqual(try service.stateStore.load().sessions, [session])
+        try await service.remove(session)
+        await expectFalse(FileManager.default.fileExists(atPath: session.path))
+        await expectEqual(try String(contentsOf: main, encoding: .utf8), "unfinished main work")
+        await expectFalse(try TestCommands.git(session.repository.path, ["worktree", "list", "--porcelain"]).contains(session.path))
     }
 
-    func testRefusesModifiedUntrackedIgnoredAndLocalCommits() throws {
+    func testRefusesModifiedUntrackedIgnoredAndLocalCommits() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let worktree = URL(fileURLWithPath: session.path)
         let tracked = worktree.appendingPathComponent("tracked.txt")
         try Data("changed".utf8).write(to: tracked)
-        XCTAssertThrowsError(try service.remove(session))
-        _ = try Commands.git(session.path, ["restore", "tracked.txt"])
+        await expectThrowsError(try await service.remove(session))
+        _ = try TestCommands.git(session.path, ["restore", "tracked.txt"])
         let untracked = worktree.appendingPathComponent("secret.xcconfig")
         try Data("local config".utf8).write(to: untracked)
-        XCTAssertThrowsError(try service.remove(session))
+        await expectThrowsError(try await service.remove(session))
         try FileManager.default.removeItem(at: untracked)
         let ignored = worktree.appendingPathComponent("ignored")
         try FileManager.default.createDirectory(at: ignored, withIntermediateDirectories: true)
         try Data("secret".utf8).write(to: ignored.appendingPathComponent("config"))
-        XCTAssertThrowsError(try service.remove(session))
+        await expectThrowsError(try await service.remove(session))
         try FileManager.default.removeItem(at: ignored)
         try Data("local commit".utf8).write(to: tracked)
-        _ = try Commands.git(session.path, ["add", "."])
-        _ = try Commands.git(session.path, ["commit", "-m", "review edits"])
-        XCTAssertThrowsError(try service.remove(session))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: session.path))
+        _ = try TestCommands.git(session.path, ["add", "."])
+        _ = try TestCommands.git(session.path, ["commit", "-m", "review edits"])
+        await expectThrowsError(try await service.remove(session))
+        await expectTrue(FileManager.default.fileExists(atPath: session.path))
     }
 
-    func testRefusesForgedPathAndEscapingProject() throws {
+    func testRefusesForgedPathAndEscapingProject() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         var forged = session; forged.path = session.repository.path
-        XCTAssertThrowsError(try service.remove(forged))
+        await expectThrowsError(try await service.remove(forged))
         var escape = session; escape.repository.entry = "../../repository"
-        XCTAssertThrowsError(try service.entry(for: escape))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: session.repository.path))
+        await expectThrowsError(try service.entry(for: escape))
+        await expectTrue(FileManager.default.fileExists(atPath: session.repository.path))
     }
 
-    func testRemovesWorktreeWithIgnoredXcodeUIState() throws {
+    func testRemovesWorktreeWithIgnoredXcodeUIState() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let worktree = URL(fileURLWithPath: session.path)
-        _ = try Commands.git(session.path, ["config", "--add", "core.excludesFile", directory.appendingPathComponent("excludes").path])
+        _ = try TestCommands.git(session.path, ["config", "--add", "core.excludesFile", directory.appendingPathComponent("excludes").path])
         try Data("xcuserdata/\n".utf8).write(to: directory.appendingPathComponent("excludes"))
         for path in [
             "ExampleApp.xcodeproj/project.xcworkspace/xcuserdata/developer.xcuserdatad/UserInterfaceState.xcuserstate",
@@ -160,60 +161,60 @@ final class PRReviewTests: XCTestCase {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("generated state".utf8).write(to: file)
         }
-        XCTAssertEqual(try service.inspect(session), "")
-        try service.remove(session)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: session.path))
+        await expectEqual(try await service.inspect(session).description, "")
+        try await service.remove(session)
+        await expectFalse(FileManager.default.fileExists(atPath: session.path))
     }
 
-    func testXcodeStateExceptionDoesNotDiscardBreakpointsOrTrackedEdits() throws {
+    func testXcodeStateExceptionDoesNotDiscardBreakpointsOrTrackedEdits() async throws {
         let (directory, service, initial) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let worktree = URL(fileURLWithPath: initial.path)
         let excludes = directory.appendingPathComponent("excludes")
         try Data("xcuserdata/\n".utf8).write(to: excludes)
-        _ = try Commands.git(initial.path, ["config", "core.excludesFile", excludes.path])
+        _ = try TestCommands.git(initial.path, ["config", "core.excludesFile", excludes.path])
         let base = "ExampleApp.xcodeproj/xcuserdata/developer.xcuserdatad/"
         for path in ["xcdebugger/Breakpoints_v2.xcbkptlist", "xcschemes/Custom.xcscheme", "secrets.xcconfig"] {
             let file = worktree.appendingPathComponent(base + path)
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("keep".utf8).write(to: file)
-            XCTAssertThrowsError(try service.remove(initial))
-            XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+            await expectThrowsError(try await service.remove(initial))
+            await expectTrue(FileManager.default.fileExists(atPath: file.path))
             try FileManager.default.removeItem(at: file)
         }
         let state = worktree.appendingPathComponent(base + "UserInterfaceState.xcuserstate")
         try Data("tracked state".utf8).write(to: state)
-        _ = try Commands.git(initial.path, ["add", "-f", state.path])
-        _ = try Commands.git(initial.path, ["commit", "-m", "track state"])
+        _ = try TestCommands.git(initial.path, ["add", "-f", state.path])
+        _ = try TestCommands.git(initial.path, ["commit", "-m", "track state"])
         var session = initial
-        session.sha = try Commands.git(initial.path, ["rev-parse", "HEAD"])
+        session.sha = try TestCommands.git(initial.path, ["rev-parse", "HEAD"])
         try Data("edited tracked state".utf8).write(to: state)
-        XCTAssertThrowsError(try service.remove(session))
+        await expectThrowsError(try await service.remove(session))
     }
 
     // Only GitHub metadata / origin identity are simulated. Fetch and checkout
     // use a real bare repository with GitHub-style PR refs.
     func remoteService(directory: URL, service: ReviewService, session: Session, sha: String) throws -> ReviewService {
         let remote = directory.appendingPathComponent("remote.git")
-        _ = try Commands.run("git", ["init", "--bare", remote.path])
-        _ = try Commands.git(session.repository.path, ["remote", "add", "origin", remote.path])
-        _ = try Commands.git(session.repository.path, ["push", "origin", "\(sha):refs/pull/1/head"])
+        _ = try TestCommands.run("git", ["init", "--bare", remote.path])
+        _ = try TestCommands.git(session.repository.path, ["remote", "add", "origin", remote.path])
+        _ = try TestCommands.git(session.repository.path, ["push", "origin", "\(sha):refs/pull/1/head"])
         var state = SavedState(); state.sessions = [session]
-        try service.save(state)
+        try service.stateStore.save(state)
         return ReviewService(storage: service.storage, command: { name, args in
             if name == "gh" { return "{\"title\":\"Updated PR\",\"headRefOid\":\"\(sha)\"}" }
             if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
-            return try Commands.run(name, args)
+            return try TestCommands.run(name, args)
         })
     }
 
-    func testUpdateFetchesLatestDetachedCommitAndPersistsBaseline() throws {
+    func testUpdateFetchesLatestDetachedCommitAndPersistsBaseline() async throws {
         let (directory, original, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let mainFile = URL(fileURLWithPath: session.repository.path).appendingPathComponent("tracked.txt")
         try Data("new PR version".utf8).write(to: mainFile)
-        _ = try Commands.git(session.repository.path, ["commit", "-am", "additional PR commit"])
-        let sha = try Commands.git(session.repository.path, ["rev-parse", "HEAD"])
+        _ = try TestCommands.git(session.repository.path, ["commit", "-am", "additional PR commit"])
+        let sha = try TestCommands.git(session.repository.path, ["rev-parse", "HEAD"])
         let service = try remoteService(directory: directory, service: original, session: session, sha: sha)
         try Data("unfinished main work".utf8).write(to: mainFile)
         let worktree = URL(fileURLWithPath: session.path)
@@ -222,97 +223,97 @@ final class PRReviewTests: XCTestCase {
         try Data("UI state".utf8).write(to: stateFile)
         let excludes = directory.appendingPathComponent("excludes")
         try Data("xcuserdata/\n".utf8).write(to: excludes)
-        _ = try Commands.git(session.path, ["config", "core.excludesFile", excludes.path])
+        _ = try TestCommands.git(session.path, ["config", "core.excludesFile", excludes.path])
 
-        let updated = try service.update(session)
-        XCTAssertEqual(updated.sha, sha)
-        XCTAssertEqual(updated.id, session.id)
-        XCTAssertEqual(updated.path, session.path)
-        XCTAssertNotNil(updated.updatedAt)
-        XCTAssertEqual(try service.load().sessions.first, updated)
-        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD")
-        XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent("tracked.txt")), "new PR version")
-        XCTAssertEqual(try String(contentsOf: mainFile), "unfinished main work")
-        XCTAssertEqual(try String(contentsOf: stateFile), "UI state")
+        let updated = try await ReviewCoordinator(service: service).update(session)
+        await expectEqual(updated.sha, sha)
+        await expectEqual(updated.id, session.id)
+        await expectEqual(updated.path, session.path)
+        await expectNotNil(updated.updatedAt)
+        await expectEqual(try service.stateStore.load().sessions.first, updated)
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD")
+        await expectEqual(try String(contentsOf: worktree.appendingPathComponent("tracked.txt"), encoding: .utf8), "new PR version")
+        await expectEqual(try String(contentsOf: mainFile, encoding: .utf8), "unfinished main work")
+        await expectEqual(try String(contentsOf: stateFile, encoding: .utf8), "UI state")
         // A second refresh is a no-op and retains its last update date.
-        XCTAssertEqual(try service.update(updated), updated)
-        XCTAssertEqual(try Commands.git(session.repository.path, ["for-each-ref", "refs/prreview"]), "")
-        try service.remove(updated)
+        await expectEqual(try await ReviewCoordinator(service: service).update(updated), updated)
+        await expectEqual(try TestCommands.git(session.repository.path, ["for-each-ref", "refs/prreview"]), "")
+        try await service.remove(updated)
     }
 
-    func testUpdateProtectsEditsUntrackedIgnoredAndLocalCommits() throws {
+    func testUpdateProtectsEditsUntrackedIgnoredAndLocalCommits() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let worktree = URL(fileURLWithPath: session.path)
         let tracked = worktree.appendingPathComponent("tracked.txt")
         try Data("edited".utf8).write(to: tracked)
-        XCTAssertThrowsError(try service.update(session))
-        XCTAssertEqual(try String(contentsOf: tracked), "edited")
-        _ = try Commands.git(session.path, ["restore", "tracked.txt"])
+        await expectThrowsError(try await service.update(session))
+        await expectEqual(try String(contentsOf: tracked, encoding: .utf8), "edited")
+        _ = try TestCommands.git(session.path, ["restore", "tracked.txt"])
         for path in ["local.xcconfig", "ignored/secrets"] {
             let file = worktree.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("keep".utf8).write(to: file)
-            XCTAssertThrowsError(try service.update(session))
-            XCTAssertEqual(try String(contentsOf: file), "keep")
+            await expectThrowsError(try await service.update(session))
+            await expectEqual(try String(contentsOf: file, encoding: .utf8), "keep")
             try FileManager.default.removeItem(at: file)
         }
         try Data("local commit".utf8).write(to: tracked)
-        _ = try Commands.git(session.path, ["commit", "-am", "local review edits"])
-        let head = try Commands.git(session.path, ["rev-parse", "HEAD"])
-        XCTAssertThrowsError(try service.update(session))
-        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), head)
+        _ = try TestCommands.git(session.path, ["commit", "-am", "local review edits"])
+        let head = try TestCommands.git(session.path, ["rev-parse", "HEAD"])
+        await expectThrowsError(try await service.update(session))
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), head)
     }
 
-    func testUpdateHandlesForcePushedPRWithoutMerging() throws {
+    func testUpdateHandlesForcePushedPRWithoutMerging() async throws {
         let (directory, original, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
-        _ = try Commands.git(session.repository.path, ["checkout", "--orphan", "rewritten"])
-        _ = try Commands.git(session.repository.path, ["commit", "-m", "rewritten PR"])
-        let sha = try Commands.git(session.repository.path, ["rev-parse", "HEAD"])
+        _ = try TestCommands.git(session.repository.path, ["checkout", "--orphan", "rewritten"])
+        _ = try TestCommands.git(session.repository.path, ["commit", "-m", "rewritten PR"])
+        let sha = try TestCommands.git(session.repository.path, ["rev-parse", "HEAD"])
         let service = try remoteService(directory: directory, service: original, session: session, sha: sha)
-        let updated = try service.update(session)
-        XCTAssertEqual(updated.sha, sha)
-        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), sha)
-        XCTAssertEqual(try service.inspect(updated), "")
+        let updated = try await ReviewCoordinator(service: service).update(session)
+        await expectEqual(updated.sha, sha)
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), sha)
+        await expectEqual(try await service.inspect(updated).description, "")
     }
 
-    func testFetchRaceLeavesReviewAtOriginalCommit() throws {
+    func testFetchRaceLeavesReviewAtOriginalCommit() async throws {
         let (directory, original, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let underlying = try remoteService(directory: directory, service: original, session: session, sha: session.sha)
         let service = ReviewService(storage: underlying.storage, command: { name, args in
             if name == "gh" { return "{\"title\":\"PR\",\"headRefOid\":\"0000000000000000000000000000000000000000\"}" }
             if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
-            return try Commands.run(name, args)
+            return try TestCommands.run(name, args)
         })
-        XCTAssertThrowsError(try service.update(session))
-        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
-        XCTAssertEqual(try service.load().sessions.first, session)
-        XCTAssertEqual(try Commands.git(session.repository.path, ["for-each-ref", "refs/prreview"]), "")
+        await expectThrowsError(try await service.update(session))
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+        await expectEqual(try service.stateStore.load().sessions.first, session)
+        await expectEqual(try TestCommands.git(session.repository.path, ["for-each-ref", "refs/prreview"]), "")
     }
 
-    func testUpdateDoesNotOverwriteIgnoredStateNewlyTrackedByPR() throws {
+    func testUpdateDoesNotOverwriteIgnoredStateNewlyTrackedByPR() async throws {
         let (directory, original, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let relative = "App.xcodeproj/xcuserdata/test.xcuserdatad/UserInterfaceState.xcuserstate"
         let mainFile = URL(fileURLWithPath: session.repository.path).appendingPathComponent(relative)
         try FileManager.default.createDirectory(at: mainFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("PR version".utf8).write(to: mainFile)
-        _ = try Commands.git(session.repository.path, ["add", "-f", relative])
-        _ = try Commands.git(session.repository.path, ["commit", "-m", "new tracked state"])
-        let sha = try Commands.git(session.repository.path, ["rev-parse", "HEAD"])
+        _ = try TestCommands.git(session.repository.path, ["add", "-f", relative])
+        _ = try TestCommands.git(session.repository.path, ["commit", "-m", "new tracked state"])
+        let sha = try TestCommands.git(session.repository.path, ["rev-parse", "HEAD"])
         let service = try remoteService(directory: directory, service: original, session: session, sha: sha)
         let local = URL(fileURLWithPath: session.path).appendingPathComponent(relative)
         try FileManager.default.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("keep local state".utf8).write(to: local)
         let excludes = directory.appendingPathComponent("excludes")
         try Data("xcuserdata/\n".utf8).write(to: excludes)
-        _ = try Commands.git(session.path, ["config", "core.excludesFile", excludes.path])
-        XCTAssertThrowsError(try service.update(session))
-        XCTAssertEqual(try String(contentsOf: local), "keep local state")
-        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
-        XCTAssertEqual(try service.load().sessions.first, session)
+        _ = try TestCommands.git(session.path, ["config", "core.excludesFile", excludes.path])
+        await expectThrowsError(try await service.update(session))
+        await expectEqual(try String(contentsOf: local, encoding: .utf8), "keep local state")
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+        await expectEqual(try service.stateStore.load().sessions.first, session)
     }
 
     func writeConfig(_ relative: String, root: String, content: String = "test configuration") throws -> URL {
@@ -322,19 +323,19 @@ final class PRReviewTests: XCTestCase {
         return file
     }
 
-    func copyFixture() throws -> (URL, ReviewService, Session) {
+    func copyFixture() async throws -> (URL, ReviewService, Session) {
         let (directory, original, initial) = try fixture()
         let path = "ignored/GoogleService-Info.plist"
         _ = try writeConfig(path, root: initial.repository.path)
-        let repository = try original.configureCopies(initial.repository, paths: [path])
+        let repository = try await original.configureCopies(initial.repository, paths: [path])
         let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
-        let session = try service.create(PullRequest(initial.prURL), repository: repository)
-        var state = try service.load(); state.sessions = [session]; state.repositories = [repository]
-        try service.save(state)
+        let session = try await service.create(PullRequest(initial.prURL), repository: repository)
+        var state = try service.stateStore.load(); state.sessions = [session]; state.repositories = [repository]
+        try service.stateStore.save(state)
         return (directory, service, session)
     }
 
-    func testLegacyStateDecodesWithoutCopySettings() throws {
+    func testLegacyStateDecodesWithoutCopySettings() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         var state = SavedState(); state.sessions = [session]; state.repositories = [session.repository]
@@ -346,12 +347,12 @@ final class PRReviewTests: XCTestCase {
         var repo = try XCTUnwrap(sessions[0]["repository"] as? [String: Any])
         repo.removeValue(forKey: "copyPaths"); sessions[0]["repository"] = repo; json["sessions"] = sessions
         let decoded = try JSONDecoder().decode(SavedState.self, from: JSONSerialization.data(withJSONObject: json))
-        XCTAssertNil(decoded.repositories[0].copyPaths)
-        XCTAssertNil(decoded.sessions[0].copiedFiles)
-        XCTAssertEqual(try service.inspect(decoded.sessions[0]), "")
+        await expectNil(decoded.repositories[0].copyPaths)
+        await expectNil(decoded.sessions[0].copiedFiles)
+        await expectEqual(try await service.inspect(decoded.sessions[0]).description, "")
     }
 
-    func testCopyConfigurationRejectsTrackedUnsafeDirectoryAndSymlinkPaths() throws {
+    func testCopyConfigurationRejectsTrackedUnsafeDirectoryAndSymlinkPaths() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let repo = session.repository
@@ -360,165 +361,366 @@ final class PRReviewTests: XCTestCase {
         try FileManager.default.createSymbolicLink(atPath: repo.path + "/ignored/link", withDestinationPath: outside.path)
         try FileManager.default.createSymbolicLink(atPath: repo.path + "/ignored/broken", withDestinationPath: directory.path + "/missing")
         for path in ["tracked.txt", "../outside", outside.path, ".git/config", "ignored/../valid.xcconfig", "ignored//valid.xcconfig", "ignored", "ignored/link", "ignored/broken"] {
-            XCTAssertThrowsError(try service.configureCopies(repo, paths: [path]), path)
+            await expectThrowsError(try await service.configureCopies(repo, paths: [path]), path)
         }
-        let configured = try service.configureCopies(repo, paths: ["ignored/valid.xcconfig", "ignored/valid.xcconfig"])
-        XCTAssertEqual(configured.copyPaths, ["ignored/valid.xcconfig"])
-        XCTAssertThrowsError(try service.relativeCopyPath(outside, repository: repo))
+        let configured = try await service.configureCopies(repo, paths: ["ignored/valid.xcconfig", "ignored/valid.xcconfig"])
+        await expectEqual(configured.copyPaths, ["ignored/valid.xcconfig"])
+        await expectThrowsError(try service.relativeCopyPath(outside, repository: repo))
     }
 
-    func testCreationCopiesIgnoredConfigsWithPrivatePermissionsAndSafeCleanup() throws {
-        let (directory, service, session) = try copyFixture()
+    func testCreationCopiesIgnoredConfigsWithPrivatePermissionsAndSafeCleanup() async throws {
+        let (directory, service, session) = try await copyFixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let relative = "ignored/GoogleService-Info.plist"
         let copy = URL(fileURLWithPath: session.path).appendingPathComponent(relative)
         let source = URL(fileURLWithPath: session.repository.path).appendingPathComponent(relative)
-        XCTAssertEqual(try String(contentsOf: copy), "test configuration")
-        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: copy.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
-        XCTAssertEqual(session.copiedFiles?.count, 1)
-        XCTAssertEqual(session.copiedFiles?.first?.sha256.count, 64)
-        XCTAssertFalse(String(decoding: try JSONEncoder().encode(session), as: UTF8.self).contains("test configuration"))
-        XCTAssertEqual(try service.load().sessions.first, session)
+        await expectEqual(try String(contentsOf: copy, encoding: .utf8), "test configuration")
+        await expectEqual((try FileManager.default.attributesOfItem(atPath: copy.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        await expectEqual(session.copiedFiles?.count, 1)
+        await expectEqual(session.copiedFiles?.first?.sha256.count, 64)
+        await expectFalse(String(decoding: try JSONEncoder().encode(session), as: UTF8.self).contains("test configuration"))
+        await expectEqual(try service.stateStore.load().sessions.first, session)
         try Data("changed source".utf8).write(to: source)
-        XCTAssertEqual(try service.inspect(session), "")
-        try service.remove(session)
-        XCTAssertEqual(try String(contentsOf: source), "changed source")
+        await expectEqual(try await service.inspect(session).description, "")
+        try await service.remove(session)
+        await expectEqual(try String(contentsOf: source, encoding: .utf8), "changed source")
     }
 
-    func testEditedCopiesBlockUpdateAndRemovalAfterReload() throws {
-        let (directory, service, session) = try copyFixture()
+    func testEditedCopiesBlockUpdateAndRemovalAfterReload() async throws {
+        let (directory, service, session) = try await copyFixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let copy = URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")
         try Data("edited locally".utf8).write(to: copy)
-        let loaded = try XCTUnwrap(service.load().sessions.first)
-        XCTAssertTrue(try service.inspect(loaded).contains("コピーしたファイルが変更されています"))
-        XCTAssertThrowsError(try service.update(loaded))
-        XCTAssertThrowsError(try service.remove(loaded))
-        XCTAssertEqual(try String(contentsOf: copy), "edited locally")
-        XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+        let loaded = try XCTUnwrap(service.stateStore.load().sessions.first)
+        await expectTrue(try await service.inspect(loaded).description.contains("コピーしたファイルが変更されています"))
+        await expectThrowsError(try await service.update(loaded))
+        await expectThrowsError(try await service.remove(loaded))
+        await expectEqual(try String(contentsOf: copy, encoding: .utf8), "edited locally")
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
         try FileManager.default.removeItem(at: copy)
-        XCTAssertEqual(try service.inspect(loaded), "")
-        try service.remove(loaded)
+        await expectEqual(try await service.inspect(loaded).description, "")
+        try await service.remove(loaded)
     }
 
-    func testCopySymlinkReplacementIsProtected() throws {
-        let (directory, service, session) = try copyFixture()
+    func testCopySymlinkReplacementIsProtected() async throws {
+        let (directory, service, session) = try await copyFixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let copy = URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")
         let outside = try writeConfig("outside-config", root: directory.path, content: "keep outside")
         try FileManager.default.removeItem(at: copy)
         try FileManager.default.createSymbolicLink(atPath: copy.path, withDestinationPath: outside.path)
-        XCTAssertThrowsError(try service.remove(session))
-        XCTAssertThrowsError(try service.update(session))
-        XCTAssertEqual(try String(contentsOf: outside), "keep outside")
+        await expectThrowsError(try await service.remove(session))
+        await expectThrowsError(try await service.update(session))
+        await expectEqual(try String(contentsOf: outside, encoding: .utf8), "keep outside")
     }
 
-    func testUpdatePreservesCopiesWhenIgnoreRuleDisappears() throws {
-        let (directory, service, session) = try copyFixture()
+    func testUpdatePreservesCopiesWhenIgnoreRuleDisappears() async throws {
+        let (directory, service, session) = try await copyFixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let root = session.repository.path
         try Data("".utf8).write(to: URL(fileURLWithPath: root).appendingPathComponent(".gitignore"))
-        _ = try Commands.git(root, ["commit", "-am", "remove ignore rule"])
-        let sha = try Commands.git(root, ["rev-parse", "HEAD"])
-        _ = try Commands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
+        _ = try TestCommands.git(root, ["commit", "-am", "remove ignore rule"])
+        let sha = try TestCommands.git(root, ["rev-parse", "HEAD"])
+        _ = try TestCommands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
         let updatedService = ReviewService(storage: service.storage, command: { name, args in
             if name == "gh" { return "{\"title\":\"Updated\",\"headRefOid\":\"\(sha)\"}" }
             if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
-            return try Commands.run(name, args)
+            return try TestCommands.run(name, args)
         })
-        let updated = try updatedService.update(session)
-        XCTAssertEqual(updated.copiedFiles, session.copiedFiles)
-        XCTAssertEqual(updated.sha, sha)
-        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")), "test configuration")
-        XCTAssertEqual(try updatedService.inspect(updated), "")
-        try updatedService.remove(updated)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/ignored/GoogleService-Info.plist"))
+        let updated = try await ReviewCoordinator(service: updatedService).update(session)
+        await expectEqual(updated.copiedFiles, session.copiedFiles)
+        await expectEqual(updated.sha, sha)
+        await expectEqual(try String(contentsOf: URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist"), encoding: .utf8), "test configuration")
+        await expectEqual(try await updatedService.inspect(updated).description, "")
+        try await updatedService.remove(updated)
+        await expectTrue(FileManager.default.fileExists(atPath: root + "/ignored/GoogleService-Info.plist"))
     }
 
-    func testUpdateStopsBeforePRTracksCopyOrReplacesItsParentWithSymlink() throws {
+    func testUpdateStopsBeforePRTracksCopyOrReplacesItsParentWithSymlink() async throws {
         for symlink in [false, true] {
-            let (directory, service, session) = try copyFixture()
+            let (directory, service, session) = try await copyFixture()
             defer { try? FileManager.default.removeItem(at: directory) }
             let root = session.repository.path
             if symlink {
                 try FileManager.default.removeItem(atPath: root + "/ignored")
                 try FileManager.default.createSymbolicLink(atPath: root + "/ignored", withDestinationPath: "other-directory")
-                _ = try Commands.git(root, ["add", "-f", "ignored"])
+                _ = try TestCommands.git(root, ["add", "-f", "ignored"])
             } else {
-                _ = try Commands.git(root, ["add", "-f", "ignored/GoogleService-Info.plist"])
+                _ = try TestCommands.git(root, ["add", "-f", "ignored/GoogleService-Info.plist"])
             }
-            _ = try Commands.git(root, ["commit", "-m", "PR collision"])
-            let sha = try Commands.git(root, ["rev-parse", "HEAD"])
-            _ = try Commands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
+            _ = try TestCommands.git(root, ["commit", "-m", "PR collision"])
+            let sha = try TestCommands.git(root, ["rev-parse", "HEAD"])
+            _ = try TestCommands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
             let updatedService = ReviewService(storage: service.storage, command: { name, args in
                 if name == "gh" { return "{\"title\":\"Collision\",\"headRefOid\":\"\(sha)\"}" }
                 if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
-                return try Commands.run(name, args)
+                return try TestCommands.run(name, args)
             })
-            XCTAssertThrowsError(try updatedService.update(session))
-            XCTAssertEqual(try Commands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
-            XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist")), "test configuration")
-            XCTAssertEqual(try updatedService.load().sessions.first, session)
+            await expectThrowsError(try await updatedService.update(session))
+            await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+            await expectEqual(try String(contentsOf: URL(fileURLWithPath: session.path).appendingPathComponent("ignored/GoogleService-Info.plist"), encoding: .utf8), "test configuration")
+            await expectEqual(try updatedService.stateStore.load().sessions.first, session)
         }
     }
 
-    func testCreationFailureDoesNotLeaveNewWorktreeWhenPRDoesNotIgnoreCopy() throws {
+    func testCreationFailureDoesNotLeaveNewWorktreeWhenPRDoesNotIgnoreCopy() async throws {
         let (directory, original, initial) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         // The user's local ignore rule is not present in the PR snapshot.
         let source = try writeConfig("local.xcconfig", root: initial.repository.path)
         try Data("local.xcconfig\n".utf8).write(to: URL(fileURLWithPath: initial.repository.path).appendingPathComponent(".gitignore"))
-        let configured = try original.configureCopies(initial.repository, paths: ["local.xcconfig"])
+        let configured = try await original.configureCopies(initial.repository, paths: ["local.xcconfig"])
         let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
-        let before = try Commands.git(initial.repository.path, ["worktree", "list", "--porcelain"])
-        XCTAssertThrowsError(try service.create(PullRequest(initial.prURL), repository: configured))
-        XCTAssertEqual(try Commands.git(initial.repository.path, ["worktree", "list", "--porcelain"]), before)
-        XCTAssertEqual(try String(contentsOf: source), "test configuration")
+        let before = try TestCommands.git(initial.repository.path, ["worktree", "list", "--porcelain"])
+        await expectThrowsError(try await service.create(PullRequest(initial.prURL), repository: configured))
+        await expectEqual(try TestCommands.git(initial.repository.path, ["worktree", "list", "--porcelain"]), before)
+        await expectEqual(try String(contentsOf: source, encoding: .utf8), "test configuration")
     }
 
-    func testCopyPathsWithWhitespaceAndGitPathspecCharactersAreLiteral() throws {
+    func testCopyPathsWithWhitespaceAndGitPathspecCharactersAreLiteral() async throws {
         let (directory, original, initial) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let relative = "ignored/ :(glob)* config\nfile.xcconfig "
         _ = try writeConfig(relative, root: initial.repository.path)
-        let configured = try original.configureCopies(initial.repository, paths: [relative])
+        let configured = try await original.configureCopies(initial.repository, paths: [relative])
         let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
-        let session = try service.create(PullRequest(initial.prURL), repository: configured)
-        XCTAssertEqual(try service.inspect(session), "")
-        try service.remove(session)
+        let session = try await service.create(PullRequest(initial.prURL), repository: configured)
+        await expectEqual(try await service.inspect(session).description, "")
+        try await service.remove(session)
     }
 
-    func testLockedRemovalPreservesCopiesEvenWhenSourceIsGone() throws {
+    func testLockedRemovalPreservesCopiesEvenWhenSourceIsGone() async throws {
         for losesIgnoreRule in [false, true] {
-            let (directory, service, initial) = try copyFixture()
+            let (directory, service, initial) = try await copyFixture()
             defer { try? FileManager.default.removeItem(at: directory) }
             var session = initial
             var removalService = service
             let root = initial.repository.path
             if losesIgnoreRule {
                 try Data("".utf8).write(to: URL(fileURLWithPath: root).appendingPathComponent(".gitignore"))
-                _ = try Commands.git(root, ["commit", "-am", "remove ignore rule"])
-                let sha = try Commands.git(root, ["rev-parse", "HEAD"])
-                _ = try Commands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
+                _ = try TestCommands.git(root, ["commit", "-am", "remove ignore rule"])
+                let sha = try TestCommands.git(root, ["rev-parse", "HEAD"])
+                _ = try TestCommands.git(root, ["push", "origin", "HEAD:refs/pull/1/head"])
                 removalService = ReviewService(storage: service.storage, command: { name, args in
                     if name == "gh" { return "{\"title\":\"Updated\",\"headRefOid\":\"\(sha)\"}" }
                     if Array(args.suffix(3)) == ["remote", "get-url", "origin"] { return "https://github.com/owner/repo.git" }
-                    return try Commands.run(name, args)
+                    return try TestCommands.run(name, args)
                 })
-                session = try removalService.update(initial)
+                session = try await ReviewCoordinator(service: removalService).update(initial)
             }
             let relative = "ignored/GoogleService-Info.plist"
             let copy = URL(fileURLWithPath: session.path).appendingPathComponent(relative)
             try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: copy.path)
             try FileManager.default.removeItem(atPath: root + "/" + relative)
-            _ = try Commands.git(root, ["worktree", "lock", session.path])
-            XCTAssertThrowsError(try removalService.remove(session))
-            XCTAssertEqual(try String(contentsOf: copy), "test configuration")
-            XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: copy.path)[.posixPermissions] as? NSNumber)?.intValue, 0o640)
-            XCTAssertEqual(try removalService.load().sessions.first, session)
-            XCTAssertEqual(try removalService.inspect(session), "")
-            _ = try Commands.git(root, ["worktree", "unlock", session.path])
-            try removalService.remove(session)
+            _ = try TestCommands.git(root, ["worktree", "lock", session.path])
+            await expectThrowsError(try await removalService.remove(session))
+            await expectEqual(try String(contentsOf: copy, encoding: .utf8), "test configuration")
+            await expectEqual((try FileManager.default.attributesOfItem(atPath: copy.path)[.posixPermissions] as? NSNumber)?.intValue, 0o640)
+            await expectEqual(try removalService.stateStore.load().sessions.first, session)
+            await expectEqual(try await removalService.inspect(session).description, "")
+            _ = try TestCommands.git(root, ["worktree", "unlock", session.path])
+            try await removalService.remove(session)
         }
     }
+    func testCoordinatorRollsBackCheckoutWhenSavingFails() async throws {
+        let (directory, original, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try writeConfig("tracked.txt", root: session.repository.path, content: "new PR")
+        _ = try TestCommands.git(session.repository.path, ["commit", "-am", "new commit"])
+        let sha = try TestCommands.git(session.repository.path, ["rev-parse", "HEAD"])
+        let service = try remoteService(directory: directory, service: original, session: session, sha: sha)
+        let store = StateStore(storage: service.storage, save: { _ in throw ReviewError("disk unavailable") })
+        let coordinator = ReviewCoordinator(service: service, store: store)
+        await expectThrowsError(try await coordinator.update(session))
+        await expectEqual(try TestCommands.git(session.path, ["rev-parse", "HEAD"]), session.sha)
+        await expectEqual(coordinator.state.sessions.first?.sha, session.sha)
+        await expectEqual(try service.stateStore.load().sessions.first?.sha, session.sha)
+        await expectFalse(coordinator.busy)
+    }
+
+    func testCoordinatorRetainsCreatedSessionOnSaveFailureAndCanRetry() async throws {
+        let (directory, original, initial) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
+        let initialState = SavedState()
+        try service.stateStore.save(initialState)
+        let failure = RetryableSave(store: service.stateStore)
+        let store = StateStore(storage: service.storage, save: { try failure.save($0) })
+        let coordinator = ReviewCoordinator(service: service, store: store)
+        await expectThrowsError(try await coordinator.create(PullRequest(initial.prURL), repository: initial.repository))
+        let created = try XCTUnwrap(coordinator.state.sessions.first)
+        await expectTrue(FileManager.default.fileExists(atPath: created.path + "/.git"))
+        await expectTrue(coordinator.hasUnsavedChanges)
+        await expectTrue(try service.stateStore.load().sessions.isEmpty)
+        failure.allowSaving()
+        try coordinator.retrySave()
+        await expectFalse(coordinator.hasUnsavedChanges)
+        await expectEqual(try service.stateStore.load().sessions.first, created)
+    }
+
+    func testCoordinatorReflectsSuccessfulRemovalWhenSaveFailsAndCanRetry() async throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var initial = SavedState(); initial.sessions = [session]
+        try service.stateStore.save(initial)
+        let failure = RetryableSave(store: service.stateStore)
+        let store = StateStore(storage: service.storage, save: { try failure.save($0) })
+        let coordinator = ReviewCoordinator(service: service, store: store)
+        await expectThrowsError(try await coordinator.remove(session))
+        await expectFalse(FileManager.default.fileExists(atPath: session.path))
+        await expectTrue(coordinator.state.sessions.isEmpty)
+        await expectTrue(coordinator.hasUnsavedChanges)
+        failure.allowSaving()
+        try coordinator.retrySave()
+        await expectTrue(try service.stateStore.load().sessions.isEmpty)
+        await expectFalse(coordinator.hasUnsavedChanges)
+    }
+
+    func testCoordinatorGateRemainsHeldAcrossAwaitAndReleasesAfterCancellation() async throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let coordinator = ReviewCoordinator(service: service)
+        let pause = OperationPause()
+        let first = Task { try await coordinator.runExclusive { await pause.hold(); return 42 } }
+        await pause.waitUntilEntered()
+        await expectTrue(coordinator.busy)
+        await expectThrowsError(try await coordinator.remove(session))
+        first.cancel()
+        await pause.resume()
+        await expectEqual(try await first.value, 42)
+        await expectFalse(coordinator.busy)
+        await expectEqual(try await coordinator.runExclusive { 7 }, 7)
+    }
+
+    func testCoordinatorProtectsCorruptLoadedStateFromAllMutations() async throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: service.storage, withIntermediateDirectories: true)
+        let file = service.storage.appendingPathComponent("state.json")
+        let corrupt = Data("broken state".utf8)
+        try corrupt.write(to: file)
+        let coordinator = ReviewCoordinator(service: service)
+        await expectNotNil(coordinator.loadError)
+        await expectThrowsError(try await coordinator.remove(session))
+        await expectThrowsError(try coordinator.retrySave())
+        await expectEqual(try Data(contentsOf: file), corrupt)
+        await expectTrue(FileManager.default.fileExists(atPath: session.path))
+    }
+
+    func testStructuredInspectionIncludesChangedCopiesAndUntrackedPaths() async throws {
+        let (directory, service, session) = try await copyFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try writeConfig("ignored/GoogleService-Info.plist", root: session.path, content: "edited")
+        _ = try writeConfig("new.xcconfig", root: session.path)
+        let report = try await service.inspect(session)
+        await expectTrue(report.blockers.contains(.changedCopy("ignored/GoogleService-Info.plist")))
+        await expectTrue(report.blockers.contains { if case .workingChanges(let records) = $0 { return records.contains { $0.contains("new.xcconfig") } }; return false })
+    }
+    func testCoordinatorPersistsCancelledBuildAfterExecutionStops() async throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try writeConfig("App.xcodeproj/project.pbxproj", root: session.path)
+        var initial = SavedState(); initial.sessions = [session]
+        try service.stateStore.save(initial)
+        let pause = OperationPause()
+        let buildService = XcodeBuildService(storage: service.storage, command: { name, arguments, output in
+            if name == "git" {
+                return CommandResult(standardOutput: try TestCommands.run(name, arguments), standardError: "", exitCode: 0, terminationDescription: "exited(0)")
+            }
+            await output?("building\n")
+            await pause.hold()
+            try Task.checkCancellation()
+            return CommandResult(standardOutput: "", standardError: "", exitCode: 0, terminationDescription: "exited(0)")
+        }, inspect: { _ in InspectionReport(blockers: []) })
+        let coordinator = ReviewCoordinator(service: service, buildService: buildService)
+        let settings = BuildSettings(scheme: "App", destination: BuildDestination(id: "host", name: "My Mac", platform: "macOS"))
+        let task = Task { try await coordinator.runBuild(session, settings: settings, action: .build) }
+        await pause.waitUntilEntered()
+        await expectTrue(coordinator.busy)
+        await expectThrowsError(try await coordinator.update(session))
+        task.cancel()
+        await pause.resume()
+        let record = try await task.value
+        await expectEqual(record.status, .cancelled)
+        await expectEqual(try service.stateStore.load().sessions.first?.buildRecords?.last, record)
+        await expectTrue(FileManager.default.fileExists(atPath: record.logPath))
+        await expectFalse(coordinator.busy)
+    }
+}
+
+// Keep setup commands synchronous and isolated to tests. Production commands use
+// structured async execution; tiny local fixture commands cannot fill pipe buffers.
+private enum TestCommands {
+    static func run(_ name: String, _ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/" + name)
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        _ = FileManager.default.createFile(atPath: output.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: output) }
+        let handle = try FileHandle(forWritingTo: output)
+        defer { try? handle.close() }
+        process.standardOutput = handle; process.standardError = handle
+        try process.run(); process.waitUntilExit()
+        let string = String(decoding: try Data(contentsOf: output), as: UTF8.self)
+        guard process.terminationStatus == 0 else { throw ReviewError(string) }
+        return arguments.contains("-z") ? string : string.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    static func git(_ path: String, _ arguments: [String]) throws -> String {
+        try run("git", ["-c", "core.hooksPath=/dev/null", "-C", path] + arguments)
+    }
+}
+
+@MainActor private func expectEqual<T: Equatable>(_ lhs: @autoclosure @MainActor () async throws -> T, _ rhs: @autoclosure @MainActor () async throws -> T, file: StaticString = #filePath, line: UInt = #line) async {
+    do { let actual = try await lhs(); let expected = try await rhs(); XCTAssertEqual(actual, expected, file: file, line: line) }
+    catch { XCTFail("Unexpected error: \(error)", file: file, line: line) }
+}
+@MainActor private func expectTrue(_ expression: @autoclosure @MainActor () async throws -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+    do { let value = try await expression(); XCTAssertTrue(value, file: file, line: line) }
+    catch { XCTFail("Unexpected error: \(error)", file: file, line: line) }
+}
+@MainActor private func expectFalse(_ expression: @autoclosure @MainActor () async throws -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+    do { let value = try await expression(); XCTAssertFalse(value, file: file, line: line) }
+    catch { XCTFail("Unexpected error: \(error)", file: file, line: line) }
+}
+@MainActor private func expectNil<T>(_ expression: @autoclosure @MainActor () async throws -> T?, file: StaticString = #filePath, line: UInt = #line) async {
+    do { let value = try await expression(); XCTAssertNil(value, file: file, line: line) }
+    catch { XCTFail("Unexpected error: \(error)", file: file, line: line) }
+}
+@MainActor private func expectNotNil<T>(_ expression: @autoclosure @MainActor () async throws -> T?, file: StaticString = #filePath, line: UInt = #line) async {
+    do { let value = try await expression(); XCTAssertNotNil(value, file: file, line: line) }
+    catch { XCTFail("Unexpected error: \(error)", file: file, line: line) }
+}
+@MainActor private func expectThrowsError<T>(_ expression: @autoclosure @MainActor () async throws -> T, _ message: String = "", file: StaticString = #filePath, line: UInt = #line) async {
+    do { _ = try await expression(); XCTFail("Expected error. " + message, file: file, line: line) }
+    catch { }
+}
+
+private final class RetryableSave: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fails = true
+    private let store: StateStore
+    init(store: StateStore) { self.store = store }
+    func allowSaving() { lock.withLock { fails = false } }
+    func save(_ state: SavedState) throws {
+        let shouldFail = lock.withLock { fails }
+        if shouldFail { throw ReviewError("disk unavailable") }
+        try store.save(state)
+    }
+}
+
+private actor OperationPause {
+    private var entered = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var release: CheckedContinuation<Void, Never>?
+    func hold() async {
+        entered = true
+        waiter?.resume(); waiter = nil
+        await withCheckedContinuation { release = $0 }
+    }
+    func waitUntilEntered() async {
+        if !entered { await withCheckedContinuation { waiter = $0 } }
+    }
+    func resume() { release?.resume(); release = nil }
 }

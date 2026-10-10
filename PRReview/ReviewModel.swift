@@ -1,5 +1,5 @@
 import SwiftUI
-import AppKit
+import Observation
 
 struct ProjectSelection: Identifiable {
     let id = UUID()
@@ -7,146 +7,210 @@ struct ProjectSelection: Identifiable {
     let entries: [String]
 }
 
-@MainActor
-final class ReviewModel: ObservableObject {
-    @Published var state = SavedState()
-    @Published var input = ""
-    @Published var busy = false
-    @Published var activity = "PRのURLを貼り付けて、Xcodeでレビューを始めましょう。"
-    @Published var error: String?
-    @Published var selected: UUID?
-    @Published var removal: Session?
-    @Published var editingRepository: Repository?
-    @Published var projectSelection: ProjectSelection?
-    @Published var projectSelectionError: String?
-    let service = ReviewService()
-    init() {
-        do { state = try service.load() } catch { self.error = "保存状態を読み込めませんでした。\n\(error.localizedDescription)" }
+/// Presentation state only. ReviewCoordinator owns persisted data and mutation order.
+@MainActor @Observable
+final class ReviewModel {
+    let coordinator: ReviewCoordinator
+    let builds: XcodeBuildService
+    var input = ""
+    var activity = "PRのURLを貼り付けて、Xcodeでレビューを始めましょう。"
+    var error: String?
+    var selected: UUID?
+    var removal: Session?
+    var editingRepository: Repository?
+    var projectSelection: ProjectSelection?
+    var projectSelectionError: String?
+    var configuringBuild: Session?
+    var buildSchemes: [String] = []
+    var buildDestinations: [BuildDestination] = []
+    var buildScheme = ""
+    var buildDestinationID = ""
+    var buildSettingsError: String?
+    var liveLog = ""
+    var runningBuild: UUID?
+    var shuttingDown = false
+    private(set) var working = false
+    @ObservationIgnored private var task: Task<Void, Never>?
+
+    init(coordinator: ReviewCoordinator = ReviewCoordinator()) {
+        self.coordinator = coordinator
+        self.builds = coordinator.buildService
+        error = coordinator.loadError
     }
+    var state: SavedState { coordinator.state }
+    var busy: Bool { working || coordinator.busy || shuttingDown }
     var session: Session? { state.sessions.first { $0.id == selected } }
-    func perform<T>(_ label: String, operation: @escaping () throws -> T, failure: ((Error) -> Void)? = nil, completion: @escaping (T) throws -> Void) {
+
+    private func launch(_ label: String, operation: @escaping @MainActor () async throws -> Void) {
         guard !busy else { return }
-        busy = true; activity = label
-        Task {
-            do {
-                let result = try await Task.detached(priority: .userInitiated) { try operation() }.value
-                try completion(result)
-            } catch {
-                if let failure { failure(error) } else { self.error = error.localizedDescription }
-                activity = "操作を完了できませんでした。"
-            }
-            busy = false
+        activity = label
+        working = true
+        task = Task {
+            defer { task = nil; working = false }
+            do { try await operation() }
+            catch is CancellationError { activity = "操作を中断しました。" }
+            catch { self.error = error.localizedDescription; activity = "操作を完了できませんでした。" }
         }
     }
     func addRepository() {
-        let folder = NSOpenPanel()
-        folder.message = "普段使っているローカルのGitリポジトリを選択"
-        folder.canChooseDirectories = true; folder.canChooseFiles = false; folder.allowsMultipleSelection = false
-        guard folder.runModal() == .OK, let root = folder.url else { return }
-        perform("Xcodeプロジェクトを検索中…", operation: { try self.service.discoverProjects(path: root.path) }) { result in
-            if result.entries.count == 1 {
-                self.registerRepository(root: result.root, entry: result.entries[0])
-            } else if result.entries.isEmpty {
-                self.chooseProjectManually(root: result.root)
+        launch("リポジトリを選択してください。") {
+            guard let root = await MacIntegration.chooseRepository() else { self.activity = "登録をキャンセルしました。"; return }
+            self.activity = "Xcodeプロジェクトを検索中…"
+            let found = try await self.coordinator.discover(path: root.path)
+            if found.entries.count == 1 {
+                try await self.register(root: found.root, entry: found.entries[0])
+            } else if found.entries.isEmpty {
+                guard let entry = await MacIntegration.chooseProject(root: found.root) else { return }
+                try await self.register(root: found.root, entry: entry.path)
             } else {
                 self.projectSelectionError = nil
-                self.projectSelection = ProjectSelection(root: result.root, entries: result.entries)
+                self.projectSelection = ProjectSelection(root: found.root, entries: found.entries)
                 self.activity = "開くXcodeプロジェクトを選んでください。"
             }
         }
     }
-    func chooseProjectManually(root: String) {
-        let project = NSOpenPanel()
-        project.message = "このリポジトリで開く.xcworkspaceまたは.xcodeprojを選択"
-        project.directoryURL = URL(fileURLWithPath: root)
-        project.canChooseFiles = true; project.canChooseDirectories = true
-        project.treatsFilePackagesAsDirectories = false; project.allowsMultipleSelection = false
-        guard project.runModal() == .OK, let entry = project.url else { return }
-        registerRepository(root: root, entry: entry.path)
+    private func register(root: String, entry: String) async throws {
+        let path = entry.hasPrefix("/") ? entry : URL(fileURLWithPath: root).appendingPathComponent(entry).path
+        let repo = try await coordinator.register(path: root, entryPath: path)
+        projectSelection = nil
+        activity = "\(repo.slug)を登録しました。"
     }
     func registerRepository(root: String, entry: String) {
-        // Discovery has finished; defer until perform releases its busy flag.
-        Task { @MainActor in
-            self.perform("リポジトリを確認中…", operation: {
-                let path = entry.hasPrefix("/") ? entry : URL(fileURLWithPath: root).appendingPathComponent(entry).path
-                return try self.service.register(path: root, entryPath: path)
-            }, failure: { error in
-                if self.projectSelection != nil { self.projectSelectionError = error.localizedDescription }
-                else { self.error = error.localizedDescription }
-            }) { repo in
-                var next = self.state
-                if let existing = next.repositories.first(where: { $0.slug.lowercased() == repo.slug.lowercased() }) {
-                    var updated = repo; updated.id = existing.id; updated.copyPaths = existing.copyPaths
-                    next.repositories.removeAll { $0.id == existing.id }; next.repositories.append(updated)
-                } else { next.repositories.append(repo) }
-                try self.service.save(next); self.state = next
-                self.projectSelection = nil
-                self.activity = "\(repo.slug)を登録しました。"
-            }
+        launch("リポジトリを確認中…") {
+            do { try await self.register(root: root, entry: entry) }
+            catch { self.projectSelectionError = error.localizedDescription }
+        }
+    }
+    func chooseProjectManually(root: String) {
+        launch("開くプロジェクトを選択してください。") {
+            guard let entry = await MacIntegration.chooseProject(root: root) else { return }
+            do { try await self.register(root: root, entry: entry.path) }
+            catch { self.projectSelectionError = error.localizedDescription }
         }
     }
     func create() {
-        do {
-            let pr = try PullRequest(input)
-            if let existing = state.sessions.first(where: { $0.prURL == pr.url }) {
-                selected = existing.id; open(existing); return
+        launch("PRを取得してworktreeを作成中…") {
+            let pr = try PullRequest(self.input)
+            if let existing = self.state.sessions.first(where: { $0.prURL == pr.url }) {
+                self.selected = existing.id
+                try await MacIntegration.openXcode(self.coordinator.service.entry(for: existing))
+                return
             }
-            guard let repo = state.repositories.first(where: { $0.slug.lowercased() == pr.slug.lowercased() }) else {
+            guard let repo = self.state.repositories.first(where: { $0.slug.lowercased() == pr.slug.lowercased() }) else {
                 throw ReviewError("\(pr.slug)のローカルリポジトリを「リポジトリ登録」から登録してください。")
             }
-            perform("PRを取得してworktreeを作成中…", operation: { try self.service.create(pr, repository: repo) }) { session in
-                // Retain the live session even if persistence fails; do not delete user files on a save error.
-                self.state.sessions.insert(session, at: 0); self.selected = session.id
-                try self.service.save(self.state)
-                self.input = ""; self.activity = "レビュー環境を作成しました。"
-                self.open(session)
-            }
-        } catch { self.error = error.localizedDescription }
+            let session = try await self.coordinator.create(pr, repository: repo)
+            self.selected = session.id; self.input = ""
+            self.activity = "レビュー環境を作成しました。"
+            try await MacIntegration.openXcode(self.coordinator.service.entry(for: session))
+        }
     }
     func saveCopies(_ repository: Repository, paths: [String], onError: @escaping (String) -> Void) {
-        perform("コピー設定を確認中…", operation: { try self.service.configureCopies(repository, paths: paths) }, failure: { onError($0.localizedDescription) }) { configured in
-            var next = self.state
-            guard let index = next.repositories.firstIndex(where: { $0.id == repository.id }) else {
-                throw ReviewError("登録リポジトリが変更されています。設定を開き直してください。")
-            }
-            next.repositories[index] = configured
-            try self.service.save(next); self.state = next
-            self.editingRepository = nil
-            self.activity = "コピー設定を保存しました。次のレビュー環境から適用します。"
+        launch("コピー設定を確認中…") {
+            do {
+                _ = try await self.coordinator.configureCopies(repository, paths: paths)
+                self.editingRepository = nil
+                self.activity = "コピー設定を保存しました。次のレビュー環境から適用します。"
+            } catch { onError(error.localizedDescription) }
         }
     }
     func open(_ session: Session) {
-        do {
-            let entry = try service.entry(for: session)
-            guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") else {
-                throw ReviewError("Xcodeが見つかりません。")
-            }
-            NSWorkspace.shared.open([entry], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                if let error { Task { @MainActor in self.error = error.localizedDescription } }
-            }
-        } catch { self.error = error.localizedDescription }
+        launch("Xcodeで開いています…") {
+            try await MacIntegration.openXcode(self.coordinator.service.entry(for: session))
+            self.activity = "Xcodeで開きました。"
+        }
     }
     func checkRemoval(_ session: Session) {
-        perform("変更とローカルコミットを確認中…", operation: { try self.service.inspect(session) }) { reason in
-            if reason.isEmpty { self.removal = session; self.activity = "削除前の確認が完了しました。" }
-            else { self.error = "環境を残しました。\n\n\(reason)"; self.activity = "保存されていないファイルを確認してください。" }
+        launch("変更とローカルコミットを確認中…") {
+            let report = try await self.coordinator.inspect(session)
+            if report.isEmpty { self.removal = session; self.activity = "削除前の確認が完了しました。" }
+            else { throw ReviewError("環境を残しました。\n\n\(report.description)") }
         }
     }
     func update(_ session: Session) {
-        perform("PRの最新コミットを取得中…", operation: { try self.service.update(session) }) { updated in
-            if let index = self.state.sessions.firstIndex(where: { $0.id == updated.id }) {
-                self.state.sessions[index] = updated
-            }
-            self.activity = updated.sha == session.sha
-                ? "すでに最新のコミットです。"
-                : "最新コミット（\(updated.sha.prefix(10))）に更新しました。"
+        launch("PRの最新コミットを取得中…") {
+            let updated = try await self.coordinator.update(session)
+            self.liveLog = ""
+            self.activity = updated.sha == session.sha ? "すでに最新のコミットです。" : "最新コミット（\(updated.sha.prefix(10))）に更新しました。"
         }
     }
     func remove(_ session: Session) {
-        perform("レビュー環境を削除中…", operation: { try self.service.remove(session) }) { _ in
-            self.state.sessions.removeAll { $0.id == session.id }; self.selected = nil
-            try self.service.save(self.state)
+        launch("レビュー環境とビルドデータを削除中…") {
+            try await self.coordinator.remove(session)
+            self.selected = nil; self.liveLog = ""
             self.activity = "レビュー環境を削除しました。"
         }
+    }
+    func configureBuild(_ session: Session) {
+        configuringBuild = session
+        buildSchemes = []; buildDestinations = []
+        buildScheme = session.repository.buildSettings?.scheme ?? ""
+        buildDestinationID = session.repository.buildSettings?.destination.id ?? ""
+        buildSettingsError = nil
+        launch("Schemeを取得中…") {
+            do {
+                let schemes = try await self.coordinator.schemes(for: session)
+                self.buildSchemes = schemes
+                if !schemes.contains(self.buildScheme) { self.buildScheme = schemes.first ?? "" }
+                if !self.buildScheme.isEmpty {
+                    self.buildDestinations = try await self.coordinator.destinations(for: session, scheme: self.buildScheme)
+                    if !self.buildDestinations.contains(where: { $0.id == self.buildDestinationID }) {
+                        self.buildDestinationID = self.buildDestinations.first?.id ?? ""
+                    }
+                }
+                self.activity = "Schemeと実行先を選択してください。"
+            } catch { self.buildSettingsError = error.localizedDescription }
+        }
+    }
+    func loadDestinations(_ session: Session) {
+        buildDestinations = []; buildDestinationID = ""; buildSettingsError = nil
+        launch("実行先を取得中…") {
+            do {
+                self.buildDestinations = try await self.coordinator.destinations(for: session, scheme: self.buildScheme)
+                self.buildDestinationID = self.buildDestinations.first?.id ?? ""
+            } catch { self.buildSettingsError = error.localizedDescription }
+        }
+    }
+    func saveBuildSettings(_ session: Session) {
+        guard !busy, let destination = buildDestinations.first(where: { $0.id == buildDestinationID }) else { return }
+        do {
+            try coordinator.saveBuildSettings(BuildSettings(scheme: buildScheme, destination: destination), for: session)
+            configuringBuild = nil; activity = "ビルド設定を保存しました。"
+        } catch { buildSettingsError = error.localizedDescription }
+    }
+    func runBuild(_ session: Session, action: BuildAction) {
+        guard let settings = session.repository.buildSettings else { configureBuild(session); return }
+        launch("\(action.label)を実行中…") {
+            self.runningBuild = session.id; self.liveLog = ""
+            defer { self.runningBuild = nil }
+            let record = try await self.coordinator.runBuild(session, settings: settings, action: action) { output in
+                await self.appendLog(output)
+            }
+            self.activity = "\(record.action.label)：\(record.status.label)"
+        }
+    }
+    private func appendLog(_ output: String) {
+        liveLog.append(output)
+        if liveLog.count > 40_000 { liveLog = String(liveLog.suffix(40_000)) }
+    }
+    func retrySave() {
+        do { try coordinator.retrySave(); activity = "状態を保存しました。" }
+        catch { self.error = error.localizedDescription }
+    }
+    func cancelBuild() { if runningBuild != nil { task?.cancel() } }
+    func shutdown() async -> Bool {
+        shuttingDown = true
+        MacIntegration.cancelSelection()
+        if runningBuild != nil || configuringBuild != nil { task?.cancel() }
+        await task?.value
+        if coordinator.hasUnsavedChanges {
+            do { try coordinator.retrySave() }
+            catch {
+                self.error = "状態を保存できないため終了を中止しました。保存先を確認し、「状態を再保存」を実行してください。\n\(error.localizedDescription)"
+                shuttingDown = false
+                return false
+            }
+        }
+        return true
     }
 }
