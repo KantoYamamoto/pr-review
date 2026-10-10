@@ -29,6 +29,7 @@ PRReview/
 Info.plistはXcodeのビルド設定から自動生成します。
 ローカルGitリポジトリとGit/ghを扱うため、App Sandboxは無効です。
 
+`scripts/bundle.sh` はローカル用のad-hoc署名を行います。Developer ID署名・公証は行っていません。
 
 ## ビルドとテスト
 
