@@ -6,6 +6,24 @@ import Testing
 @Suite("Application termination")
 @MainActor
 struct ReviewModelTests {
+    @Test func unregisteredRepositoryIsRejectedBeforeCreatingAWorktree() async throws {
+        let storage = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: storage) }
+        let called = Mutex(false)
+        let service = ReviewService(storage: storage, command: { _, _ in
+            called.withLock { $0 = true }
+            throw ReviewError("Unexpected external command")
+        })
+        let coordinator = ReviewCoordinator(service: service)
+        let repository = Repository(path: "/unused", slug: "owner/repo", entry: "App.xcodeproj")
+        await #expect(throws: ReviewError.self) {
+            try await coordinator.create(PullRequest("https://github.com/owner/repo/pull/1"), repository: repository)
+        }
+        #expect(!called.withLock { $0 })
+        #expect(coordinator.state.sessions.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: service.worktrees.path))
+    }
+
     @Test func failedSavePreventsQuitAndAllowsRetry() async throws {
         let storage = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: storage) }

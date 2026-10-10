@@ -69,6 +69,7 @@ public final class ReviewCoordinator {
     public func create(_ pr: PullRequest, repository: Repository) async throws -> Session {
         try await runExclusive {
             if let existing = state.sessions.first(where: { $0.prURL == pr.url }) { return existing }
+            let repository = try currentRepository(repository.id)
             let service = service
             // Do not cancel a transaction after Git begins changing the filesystem.
             // The gate stays held until the task and its recovery work are complete.
@@ -142,10 +143,7 @@ public final class ReviewCoordinator {
     }
 
     public func relativeCopyPath(_ file: URL, repository: Repository) throws -> String {
-        guard let current = state.repositories.first(where: { $0.id == repository.id }) else {
-            throw ReviewError("登録リポジトリが変更されています。設定を開き直してください。")
-        }
-        return try service.relativeCopyPath(file, repository: current)
+        try service.relativeCopyPath(file, repository: currentRepository(repository.id))
     }
 
     public func artifactURL(_ path: String, for session: Session) throws -> URL {
@@ -196,7 +194,7 @@ public final class ReviewCoordinator {
         let index = try currentIndex(session)
         var next = state
         next.sessions[index].repository.buildSettings = settings
-        if let repositoryIndex = next.repositories.firstIndex(where: { $0.id == session.repository.id }) {
+        if let repositoryIndex = next.repositories.firstIndex(where: { $0.id == state.sessions[index].repository.id }) {
             next.repositories[repositoryIndex].buildSettings = settings
         }
         try persist(next)
@@ -206,6 +204,13 @@ public final class ReviewCoordinator {
         guard !busy else { throw ReviewError("別の操作を実行中です。") }
         if let loadError { throw ReviewError(loadError) }
         try persist(state)
+    }
+
+    private func currentRepository(_ id: UUID) throws -> Repository {
+        guard let repository = state.repositories.first(where: { $0.id == id }) else {
+            throw ReviewError("登録リポジトリが見つかりません。登録を確認してください。")
+        }
+        return repository
     }
 
     private func currentIndex(_ session: Session) throws -> Int {

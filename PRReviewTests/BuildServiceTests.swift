@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Synchronization
 @testable import PRReview
 
 @Suite("Xcode build workflows")
@@ -191,27 +192,81 @@ struct BuildConfigurationTests {
         #expect(saved.repositories.first?.buildSettings?.scheme == "Other")
     }
 
-    @Test func failedReloadClearsCandidatesWithoutChangingStoredSettings() async throws {
+    @Test(arguments: [true, false])
+    func failedReloadClearsCandidatesWithoutChangingStoredSettings(duringSchemeListing: Bool) async throws {
         let fixture = try BuildFixture()
         defer { fixture.remove() }
+        var session = fixture.session
+        session.repository.buildSettings = fixture.settings
         var state = SavedState()
-        state.sessions = [fixture.session]
+        state.sessions = [session]
+        state.repositories = [session.repository]
         let store = StateStore(storage: fixture.directory)
         try store.save(state)
-        let failed = XcodeBuildService(storage: fixture.directory, command: { _, _, _ in throw ReviewError("Xcode unavailable") })
-        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), buildService: failed)
-        let draft = BuildConfigurationModel(session: fixture.session, coordinator: coordinator)
+        let fail = Mutex(false)
+        let builds = configurationService(fixture: fixture) { arguments in
+            fail.withLock { $0 } && (duringSchemeListing ? arguments.contains("-list") : arguments.contains("-showdestinations"))
+        }
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), buildService: builds)
+        let draft = BuildConfigurationModel(session: session, coordinator: coordinator)
+        await draft.load()
+        #expect(draft.settings == fixture.settings)
+        #expect(!draft.schemes.isEmpty)
+        #expect(!draft.destinations.isEmpty)
+        fail.withLock { $0 = true }
         await draft.load()
         #expect(draft.error?.contains("Xcode unavailable") == true)
-        #expect(draft.schemes.isEmpty)
+        #expect(draft.schemes.isEmpty == duringSchemeListing)
         #expect(draft.destinations.isEmpty)
         #expect(draft.settings == nil)
         #expect(!draft.save())
-        #expect(try store.load().sessions.first?.repository.buildSettings == nil)
+        #expect(coordinator.state.sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(try store.load().sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(try store.load().repositories.first?.buildSettings == fixture.settings)
     }
 
-    private func configurationService(fixture: BuildFixture) -> XcodeBuildService {
+    @Test func failedSaveKeepsDraftAndStoredDefaultsUntilRetrySucceeds() async throws {
+        let fixture = try BuildFixture()
+        defer { fixture.remove() }
+        var session = fixture.session
+        session.repository.buildSettings = fixture.settings
+        var state = SavedState()
+        state.sessions = [session]
+        state.repositories = [session.repository]
+        let backingStore = StateStore(storage: fixture.directory)
+        try backingStore.save(state)
+        let fail = Mutex(true)
+        let store = StateStore(storage: fixture.directory, save: { next in
+            if fail.withLock({ $0 }) { throw ReviewError("disk unavailable") }
+            try backingStore.save(next)
+        })
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), store: store,
+                                            buildService: configurationService(fixture: fixture))
+        let draft = BuildConfigurationModel(session: session, coordinator: coordinator)
+        await draft.load()
+        draft.selectScheme("Other")
+        await draft.loadDestinations()
+        let selection = try #require(draft.settings)
+        #expect(selection.scheme == "Other")
+        #expect(!draft.save())
+        #expect(draft.error?.contains("disk unavailable") == true)
+        #expect(draft.settings == selection)
+        #expect(coordinator.state.sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(coordinator.state.repositories.first?.buildSettings == fixture.settings)
+        #expect(try backingStore.load().sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(try backingStore.load().repositories.first?.buildSettings == fixture.settings)
+        fail.withLock { $0 = false }
+        #expect(draft.save())
+        #expect(draft.error == nil)
+        #expect(coordinator.state.sessions.first?.repository.buildSettings == selection)
+        #expect(coordinator.state.repositories.first?.buildSettings == selection)
+        #expect(try backingStore.load().sessions.first?.repository.buildSettings == selection)
+        #expect(try backingStore.load().repositories.first?.buildSettings == selection)
+    }
+
+    private func configurationService(fixture: BuildFixture, shouldFail: @escaping @Sendable ([String]) -> Bool = { _ in false }) -> XcodeBuildService {
         XcodeBuildService(storage: fixture.directory, command: { _, arguments, _ in
+            if shouldFail(arguments) { throw ReviewError("Xcode unavailable") }
             let output = arguments.contains("-list") ? #"{"project":{"schemes":["App","Other"]}}"# : """
             Available destinations for the selected scheme:
                 { platform:iOS Simulator, id:SIM, name:iPhone }

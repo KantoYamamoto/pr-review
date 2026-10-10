@@ -61,6 +61,7 @@ final class BuildConfigurationModel: Identifiable {
         }
         do {
             try coordinator.saveBuildSettings(settings, for: session)
+            error = nil
             return true
         } catch {
             self.error = error.localizedDescription

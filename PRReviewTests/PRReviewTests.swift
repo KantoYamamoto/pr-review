@@ -538,11 +538,54 @@ final class PRReviewTests: XCTestCase {
         await expectFalse(coordinator.busy)
     }
 
+    func testCreateUsesCurrentRepositorySettingsFromStoredState() async throws {
+        let (directory, original, initial) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
+        let settings = BuildSettings(scheme: "App", destination: BuildDestination(id: "Mac", name: "My Mac", platform: "macOS"))
+        var repository = initial.repository
+        repository.buildSettings = settings
+        var state = SavedState()
+        state.repositories = [repository]
+        try service.stateStore.save(state)
+        let path = "ignored/local.xcconfig"
+        _ = try writeConfig(path, root: repository.path, content: "local settings")
+        let coordinator = ReviewCoordinator(service: service)
+        _ = try await coordinator.configureCopies(initial.repository, paths: [path])
+        let session = try await coordinator.create(PullRequest(initial.prURL), repository: initial.repository)
+        await expectEqual(session.repository.buildSettings, settings)
+        await expectEqual(session.repository.copyPaths, [path])
+        await expectEqual(session.copiedFiles?.map(\.path), [path])
+        let copy = URL(fileURLWithPath: session.path).appendingPathComponent(path)
+        await expectEqual(try String(contentsOf: copy, encoding: .utf8), "local settings")
+        await expectEqual(try service.stateStore.load().sessions.first, session)
+    }
+
+    func testBuildDefaultsUseStoredSessionRepositoryIdentity() async throws {
+        let (directory, service, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let other = Repository(path: "/other", slug: "owner/other", entry: "Other.xcodeproj")
+        var state = SavedState()
+        state.repositories = [session.repository, other]
+        state.sessions = [session]
+        try service.stateStore.save(state)
+        let coordinator = ReviewCoordinator(service: service)
+        var snapshot = session
+        snapshot.repository = other
+        let settings = BuildSettings(scheme: "App", destination: BuildDestination(id: "Mac", name: "My Mac", platform: "macOS"))
+        try coordinator.saveBuildSettings(settings, for: snapshot)
+        let saved = try service.stateStore.load()
+        await expectEqual(saved.sessions.first?.repository.buildSettings, settings)
+        await expectEqual(saved.repositories.first?.buildSettings, settings)
+        await expectNil(saved.repositories.last?.buildSettings)
+    }
+
     func testCoordinatorRetainsCreatedSessionOnSaveFailureAndCanRetry() async throws {
         let (directory, original, initial) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let service = try remoteService(directory: directory, service: original, session: initial, sha: initial.sha)
-        let initialState = SavedState()
+        var initialState = SavedState()
+        initialState.repositories = [initial.repository]
         try service.stateStore.save(initialState)
         let failure = RetryableSave(store: service.stateStore)
         let store = StateStore(storage: service.storage, save: { try failure.save($0) })
