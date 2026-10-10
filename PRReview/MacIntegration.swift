@@ -47,6 +47,10 @@ enum MacIntegration {
         }
     }
 
+    static func openArtifact(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
     static func openXcode(_ entry: URL) async throws {
         guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") else {
             throw ReviewError("Xcodeが見つかりません。")

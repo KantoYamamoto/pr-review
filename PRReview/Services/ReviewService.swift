@@ -4,9 +4,9 @@ public struct ReviewService: Sendable {
     public let storage: URL
     let command: @Sendable (String, [String]) async throws -> String
     public var stateStore: StateStore { StateStore(storage: storage) }
-    public var worktrees: URL { storage.appendingPathComponent("Worktrees", isDirectory: true) }
+    public var worktrees: URL { ReviewPaths(storage: storage).worktrees }
     public init(storage: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/PRReview"), command: @escaping @Sendable (String, [String]) async throws -> String = CommandRunner.run) {
-        self.storage = storage
+        self.storage = storage.standardizedFileURL
         self.command = command
     }
     @concurrent

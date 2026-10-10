@@ -5,8 +5,8 @@ import Testing
 @Suite("Xcode build workflows")
 struct BuildServiceTests {
     @Test func metadataParsersFilterUnavailableDevicesAndPreserveNames() throws {
-        #expect(try XcodeBuildService.parseSchemes(#"{"workspace":{"schemes":["Z","A","A"]}}"#) == ["A", "Z"])
-        #expect(try XcodeBuildService.parseSchemes(#"{"project":{"schemes":["App"]}}"#) == ["App"])
+        #expect(try XcodeBuildOutput.parseSchemes(#"{"workspace":{"schemes":["Z","A","A"]}}"#) == ["A", "Z"])
+        #expect(try XcodeBuildOutput.parseSchemes(#"{"project":{"schemes":["App"]}}"#) == ["App"])
         let output = """
         Available destinations for the "App" scheme:
           { platform:macOS, arch:arm64, id:MAC, name:My Mac }
@@ -18,12 +18,12 @@ struct BuildServiceTests {
         Ineligible destinations for the "App" scheme:
           { platform:macOS, id:BADMAC, name:Other Mac }
         """
-        let destinations = XcodeBuildService.parseDestinations(output)
+        let destinations = XcodeBuildOutput.parseDestinations(output)
         #expect(destinations.count == 2)
         #expect(destinations.contains(BuildDestination(id: "SIM", name: "iPhone, QA: device", platform: "iOS Simulator")))
         #expect(destinations.contains(BuildDestination(id: "MAC", name: "My Mac", platform: "macOS")))
         // Xcode 27 uses a different section heading and whitespace after the opening brace.
-        #expect(XcodeBuildService.parseDestinations("""
+        #expect(XcodeBuildOutput.parseDestinations("""
             Destinations compatible with the "App" scheme:
                 { platform:macOS, arch:arm64,id:MAC, name:My Mac }
             Destinations incompatible with the "App" scheme:
@@ -155,5 +155,68 @@ private actor BuildInspectionProbe {
     func next() -> InspectionReport {
         calls += 1
         return InspectionReport(blockers: calls == 1 ? [] : [.workingChanges(["M App.swift"])])
+    }
+}
+
+@Suite("Build configuration drafts")
+@MainActor
+struct BuildConfigurationTests {
+    @Test func loadingUsesSavedSelectionAndOnlySaveChangesDefaults() async throws {
+        let fixture = try BuildFixture()
+        defer { fixture.remove() }
+        var session = fixture.session
+        session.repository.buildSettings = fixture.settings
+        var state = SavedState()
+        state.sessions = [session]
+        state.repositories = [session.repository]
+        let store = StateStore(storage: fixture.directory)
+        try store.save(state)
+        let builds = configurationService(fixture: fixture)
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), buildService: builds)
+        let draft = BuildConfigurationModel(session: session, coordinator: coordinator)
+        #expect(draft.settings == nil)
+        await draft.load()
+        #expect(draft.error == nil)
+        #expect(draft.settings == fixture.settings)
+        draft.selectScheme("Other")
+        #expect(draft.destinations.isEmpty)
+        #expect(draft.destinationID.isEmpty)
+        #expect(draft.settings == nil)
+        #expect(!draft.save())
+        #expect(try store.load().repositories.first?.buildSettings == fixture.settings)
+        await draft.loadDestinations()
+        #expect(draft.save())
+        let saved = try store.load()
+        #expect(saved.sessions.first?.repository.buildSettings?.scheme == "Other")
+        #expect(saved.repositories.first?.buildSettings?.scheme == "Other")
+    }
+
+    @Test func failedReloadClearsCandidatesWithoutChangingStoredSettings() async throws {
+        let fixture = try BuildFixture()
+        defer { fixture.remove() }
+        var state = SavedState()
+        state.sessions = [fixture.session]
+        let store = StateStore(storage: fixture.directory)
+        try store.save(state)
+        let failed = XcodeBuildService(storage: fixture.directory, command: { _, _, _ in throw ReviewError("Xcode unavailable") })
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), buildService: failed)
+        let draft = BuildConfigurationModel(session: fixture.session, coordinator: coordinator)
+        await draft.load()
+        #expect(draft.error?.contains("Xcode unavailable") == true)
+        #expect(draft.schemes.isEmpty)
+        #expect(draft.destinations.isEmpty)
+        #expect(draft.settings == nil)
+        #expect(!draft.save())
+        #expect(try store.load().sessions.first?.repository.buildSettings == nil)
+    }
+
+    private func configurationService(fixture: BuildFixture) -> XcodeBuildService {
+        XcodeBuildService(storage: fixture.directory, command: { _, arguments, _ in
+            let output = arguments.contains("-list") ? #"{"project":{"schemes":["App","Other"]}}"# : """
+            Available destinations for the selected scheme:
+                { platform:iOS Simulator, id:SIM, name:iPhone }
+            """
+            return CommandResult(standardOutput: output, standardError: "", exitCode: 0, terminationDescription: "exited(0)")
+        })
     }
 }

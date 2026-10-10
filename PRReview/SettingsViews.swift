@@ -35,7 +35,7 @@ struct CopySettingsView: View {
                         defer { choosing = false }
                         let files = await MacIntegration.chooseCopyFiles(repository: repository)
                         do {
-                            let added = try files.map { try model.coordinator.service.relativeCopyPath($0, repository: repository) }
+                            let added = try files.map { try model.coordinator.relativeCopyPath($0, repository: repository) }
                             paths = Array(Set(paths + added)).sorted(); error = nil
                         } catch { self.error = error.localizedDescription }
                     }
@@ -77,34 +77,34 @@ struct ProjectSelectionView: View {
 
 struct BuildSettingsView: View {
     @Bindable var model: ReviewModel
-    let session: Session
+    @Bindable var configuration: BuildConfigurationModel
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("ビルド・テストの設定").font(.title2.bold())
             Text("このレビューと、次に作るレビュー環境の既定値として保存します。").foregroundStyle(.secondary)
-            Picker("Scheme", selection: Binding(get: { model.buildScheme }, set: {
-                model.buildScheme = $0; model.buildDestinations = []; model.buildDestinationID = ""
+            Picker("Scheme", selection: Binding(get: { configuration.scheme }, set: {
+                configuration.selectScheme($0)
             })) {
-                if model.buildSchemes.isEmpty { Text("Schemeなし").tag("") }
-                ForEach(model.buildSchemes, id: \.self) { Text($0).tag($0) }
+                if configuration.schemes.isEmpty { Text("Schemeなし").tag("") }
+                ForEach(configuration.schemes, id: \.self) { Text($0).tag($0) }
             }.disabled(model.busy)
             HStack {
-                Picker("実行先", selection: $model.buildDestinationID) {
-                    if model.buildDestinations.isEmpty { Text("実行先を取得してください").tag("") }
-                    ForEach(model.buildDestinations) { Text($0.label).tag($0.id) }
+                Picker("実行先", selection: $configuration.destinationID) {
+                    if configuration.destinations.isEmpty { Text("実行先を取得してください").tag("") }
+                    ForEach(configuration.destinations) { Text($0.label).tag($0.id) }
                 }
-                Button("実行先を取得") { model.loadDestinations(session) }.disabled(model.buildScheme.isEmpty || model.busy)
+                Button("実行先を取得") { model.loadDestinations(configuration) }.disabled(configuration.scheme.isEmpty || model.busy)
             }.disabled(model.busy)
             Text("macOSとiOS Simulatorに対応します。実機へのインストールやSimulatorの作成は行いません。")
                 .font(.caption).foregroundStyle(.secondary)
             if model.busy { ProgressView().controlSize(.small) }
-            if let error = model.buildSettingsError { ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled) }.frame(maxHeight: 160) }
+            if let error = configuration.error { ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled) }.frame(maxHeight: 160) }
             HStack {
-                Button("再取得") { model.configureBuild(session) }
+                Button("再取得") { model.reloadBuildConfiguration(configuration) }
                 Spacer()
-                Button("キャンセル") { model.configuringBuild = nil }
-                Button("保存") { model.saveBuildSettings(session) }.buttonStyle(.borderedProminent)
-                    .disabled(model.buildScheme.isEmpty || model.buildDestinationID.isEmpty)
+                Button("キャンセル") { model.buildConfiguration = nil }
+                Button("保存") { model.saveBuildSettings(configuration) }.buttonStyle(.borderedProminent)
+                    .disabled(configuration.settings == nil)
             }.disabled(model.busy)
         }.padding(24).frame(width: 650).interactiveDismissDisabled(model.busy)
     }

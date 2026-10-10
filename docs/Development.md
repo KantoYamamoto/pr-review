@@ -15,11 +15,12 @@ PRReview/
 │   ├── PRReviewApp.swift        # ウィンドウ・終了時の処理
 │   ├── ContentView.swift       # レビュー一覧・詳細
 │   ├── SettingsViews.swift     # プロジェクト・コピー・ビルド設定
-│   ├── ReviewModel.swift       # Observationによる画面状態
+│   ├── ReviewModel.swift       # メイン画面の状態・操作Task
+│   ├── BuildConfigurationModel.swift # ビルド設定の下書き・候補・検証
 │   ├── MacIntegration.swift    # ファイル選択・Xcode起動
 │   ├── Domain/                 # Sendableな保存モデル・保護理由
 │   ├── Services/               # レビュー操作・保存・コピー・検出・ビルド
-│   ├── Infrastructure/         # Git・GitHub・非同期コマンド・パス検証
+│   ├── Infrastructure/         # 外部コマンド・Xcode検証・生成物・出力解析
 │   └── Assets.xcassets/
 ├── PRReviewTests/               # 実Git・保存失敗・プロセス中断・実Xcode検証
 ├── docs/Architecture.md

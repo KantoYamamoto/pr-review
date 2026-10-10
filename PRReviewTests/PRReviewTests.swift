@@ -616,6 +616,33 @@ final class PRReviewTests: XCTestCase {
         await expectTrue(report.blockers.contains(.changedCopy("ignored/GoogleService-Info.plist")))
         await expectTrue(report.blockers.contains { if case .workingChanges(let records) = $0 { return records.contains { $0.contains("new.xcconfig") } }; return false })
     }
+    func testCoordinatorUsesStoredCopyFingerprintsInsteadOfCallerSnapshot() async throws {
+        let (directory, service, session) = try await copyFixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = "ignored/GoogleService-Info.plist"
+        let file = try writeConfig(path, root: session.path, content: "user changes")
+        var snapshot = session
+        snapshot.copiedFiles = [CopiedFile(path: path, sha256: ReviewService.digest(try Data(contentsOf: file)))]
+        let coordinator = ReviewCoordinator(service: service)
+        let report = try await coordinator.inspect(snapshot)
+        await expectTrue(report.blockers.contains(.changedCopy(path)))
+        await expectThrowsError(try await coordinator.remove(snapshot))
+        await expectEqual(try String(contentsOf: file, encoding: .utf8), "user changes")
+        await expectEqual(coordinator.state.sessions.first, session)
+    }
+
+    func testUpdatePreservesBuildSettingsSavedAfterSessionWasSelected() async throws {
+        let (directory, original, session) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = try remoteService(directory: directory, service: original, session: session, sha: session.sha)
+        let coordinator = ReviewCoordinator(service: service)
+        let settings = BuildSettings(scheme: "App", destination: BuildDestination(id: "Mac", name: "My Mac", platform: "macOS"))
+        try coordinator.saveBuildSettings(settings, for: session)
+        let updated = try await coordinator.update(session)
+        await expectEqual(updated.repository.buildSettings, settings)
+        await expectEqual(try service.stateStore.load().sessions.first?.repository.buildSettings, settings)
+    }
+
     func testCoordinatorPersistsCancelledBuildAfterExecutionStops() async throws {
         let (directory, service, session) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }

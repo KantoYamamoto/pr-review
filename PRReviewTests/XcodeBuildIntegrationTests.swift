@@ -33,11 +33,7 @@ struct XcodeBuildIntegrationTests {
         let settings = BuildSettings(scheme: "Smoke", destination: destination)
         try coordinator.saveBuildSettings(settings, for: session)
         for action in [BuildAction.build, .test] {
-            let record = try await coordinator.runExclusive {
-                let record = try await builds.run(session, settings: settings, action: action)
-                try coordinator.recordBuild(record, for: session)
-                return record
-            }
+            let record = try await coordinator.runBuild(session, settings: settings, action: action)
             let log = try String(contentsOfFile: record.logPath, encoding: .utf8)
             #expect(record.status == .succeeded, "\(action.rawValue) failed:\n\(log.suffix(10000))")
             #expect(record.sha == sha)

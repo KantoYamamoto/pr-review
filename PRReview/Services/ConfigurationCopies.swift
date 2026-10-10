@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 
 extension ReviewService {
     @concurrent
@@ -35,6 +36,29 @@ extension ReviewService {
         do { _ = try await git(root, ["check-ignore", "--quiet", "--", path]) }
         catch { throw ReviewError("コピー対象はGitのignore設定に含めてください：\(path)") }
     }
+    @concurrent
+    func installCopies(_ copies: [(path: String, data: Data)], at path: String) async throws -> [CopiedFile] {
+        // Validate every destination before writing any local configuration.
+        for copy in copies {
+            let destination = try RepositoryFileSafety.file(root: path, relative: copy.path)
+            guard !FileManager.default.fileExists(atPath: destination.path) else {
+                throw ReviewError("PR内にコピー先が存在します：\(copy.path)")
+            }
+            try await requireIgnoredUntracked(copy.path, root: path)
+        }
+        for copy in copies {
+            let destination = try RepositoryFileSafety.file(root: path, relative: copy.path)
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            _ = try RepositoryFileSafety.file(root: path, relative: copy.path)
+            let descriptor = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else { throw ReviewError("コピー先に安全にファイルを作成できません：\(copy.path)") }
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            do { try handle.write(contentsOf: copy.data); try handle.close() }
+            catch { try? handle.close(); throw error }
+        }
+        return copies.map { CopiedFile(path: $0.path, sha256: Self.digest($0.data)) }
+    }
+
     static func digest(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
