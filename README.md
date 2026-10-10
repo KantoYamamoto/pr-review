@@ -1,11 +1,32 @@
 # PR Review
 
-PRのURLを貼ってレビュー用のGit worktreeを作り、Xcodeで開くmacOSアプリの試作。
-普段の作業中のファイルやブランチを切り替えずにレビューできます。
+PRを手元のXcodeで確認するためのmacOSアプリです。
 
-## 起動
+自分の作業中に別のPRを確認したくなったとき、変更を退避してブランチを切り替える手間を減らします。
+PRのURLを貼ると、レビュー用の作業フォルダを作ってXcodeで開きます。
 
-macOS 26以降、Xcode 26以降（Swift 6.2以降）、Git、認証済みのGitHub CLIが必要です。
+レビュー用のフォルダにはGit worktreeを使っています。
+普段の作業フォルダやブランチを切り替えずに、別のPRを確認できます。
+PRに追加されたコミットの取得、ビルド・テスト、レビュー後の片付けもアプリから操作できます。
+
+![PRのURL入力、レビュー一覧、ビルド・テストの操作画面](docs/images/review.jpg)
+
+*架空のリポジトリ・PRを使った表示例です。*
+
+## 使い方
+
+1. **リポジトリを登録する。** 普段使っているローカルリポジトリを選びます。Xcodeプロジェクトは自動で検出します。複数見つかった場合は、開くものを選んでください。
+2. **PRのURLを貼る。** `https://github.com/owner/repo/pull/123` を入力して「レビュー開始」を押すと、専用の作業フォルダを作ってXcodeで開きます。
+3. **Xcodeで確認する。** レビューは左の一覧から再開できます。追加コミットを確認したいときは、Xcodeの該当プロジェクトを閉じて「最新コミットを取得」を押します。
+4. **レビューを終える。** Xcodeで未保存の編集を保存し、該当プロジェクトを閉じて「レビュー終了…」を押します。レビュー用の作業フォルダとアプリから実行したビルドのデータを片付けます。
+
+アプリからビルド・テストする場合は、レビュー画面の「設定…」でSchemeと実行先を選びます。
+設定はリポジトリごとに保存され、ログやテスト結果はレビュー画面から開けます。
+
+## ビルドして起動する
+
+必要なものはmacOS 26以降、Xcode 26以降（Swift 6.2以降）、Git、GitHub CLIです。
+先にXcodeを起動して初期設定を済ませてください。以下の手順ではHomebrewを使います。
 
 ```sh
 git clone https://github.com/KantoYamamoto/pr-review.git
@@ -16,151 +37,36 @@ gh auth login
 open 'dist/PR Review.app'
 ```
 
+GitHub CLIをインストール・認証済みなら、`brew install gh` と `gh auth login` は省略できます。
 Xcodeで `PRReview.xcodeproj` を開き、PRReview scheme / My Macを選んで ⌘R でも起動できます。
-ローカル用のad-hoc署名です。配布用のDeveloper ID署名・公証は含みません。
+ローカル用のad-hoc署名で、Developer ID署名・公証は行っていません。
 
-## プロジェクト構成
+Gitの取得時に認証エラーになる場合は、HTTPS接続なら `gh auth setup-git`、SSH接続ならSSH認証の設定を確認してください。
 
-通常のXcode macOS Appプロジェクトとして、アプリとユニットテストの2ターゲットを用意しています。
-Swift 6言語モードでデータ競合を検査し、Swift Subprocess 1.0.1を固定して利用します。
-依存バージョンは `Package.resolved` に記録します。設計の詳細は [Architecture](docs/Architecture.md) を参照してください。
+## Firebaseなどの設定ファイルを使う場合
 
-```text
-PRReview/
-├── PRReview.xcodeproj/          # App・テスト・共有scheme・パッケージ定義
-├── PRReview/
-│   ├── PRReviewApp.swift        # ウィンドウ・終了時の処理
-│   ├── ContentView.swift       # レビュー一覧・詳細
-│   ├── SettingsViews.swift     # プロジェクト・コピー・ビルド設定
-│   ├── ReviewModel.swift       # Observationによる画面状態
-│   ├── MacIntegration.swift    # ファイル選択・Xcode起動
-│   ├── Domain/                 # Sendableな保存モデル・保護理由
-│   ├── Services/               # レビュー操作・保存・コピー・検出・ビルド
-│   ├── Infrastructure/         # Git・GitHub・非同期コマンド・パス検証
-│   └── Assets.xcassets/
-├── PRReviewTests/               # 実Git・保存失敗・プロセス中断・実Xcode検証
-├── docs/Architecture.md
-└── scripts/bundle.sh
-```
+Gitで管理していない `GoogleService-Info.plist` やローカルの `.xcconfig` は、
+登録リポジトリの横にあるコピーボタンから指定できます。
+次にレビューを始めるとき、元のリポジトリから同じ相対パスへコピーします。
 
-Info.plistはXcodeのビルド設定から自動生成します。
-ローカルGitリポジトリとGit/ghを扱うため、App Sandboxは無効です。
+対象はリポジトリ内の `.gitignore` などで除外されたファイルです。
+フォルダのコピーには対応していません。コピーしたファイルを編集すると、更新・終了時に削除を止めます。
+必要な内容を元のリポジトリなどへ保存してください。
+詳しい条件は[設定ファイルのコピー](docs/Usage.md#firebase設定ローカル設定をコピーする)を参照してください。
 
-## 使い方
+## 利用前に知っておくこと
 
-1. 「リポジトリ登録」で普段使っているローカルrepoを選ぶ。
-2. repo内の `.xcworkspace` / `.xcodeproj` を自動検出。1件ならそのまま登録し、
-   複数なら相対パスの一覧から選びます（workspaceを先に表示）。候補がない場合は手動選択します。
-   複数候補の一覧からも手動選択できます。Gitのignore対象（未追跡）、Pods / Carthage / node_modules、
-   build / DerivedData / .build、シンボリックリンク、パッケージ内部は検索対象外です。
-   未追跡でもignoreされていないプロジェクトは候補になりますが、PR側にも同じパスが必要です。
-3. `https://github.com/owner/repo/pull/123` を貼り「レビュー開始」。
-4. 専用worktreeが作られ、登録したプロジェクトをXcodeで開く。
-5. 左の一覧から再開。GitHubのPRやFinderにも移動できる。
-   PRに追加コミットが入ったらXcodeの該当プロジェクトを閉じて「最新コミットを取得」。
-   同じworktreeを最新SHAに切り替え、コミット表示と最終更新日時を更新します。
-6. レビュー後はXcodeの該当プロジェクトを閉じ、未保存の編集を保存して「レビュー終了…」。
+- GitHub.comのPRに対応しています。対象リポジトリはあらかじめ手元にcloneし、`origin` をPRと同じリポジトリに向けてください。
+- PRの追加コミットは自動では取り込みません。「最新コミットを取得」で更新します。
+- レビュー用フォルダに編集したファイルや未追跡ファイルなどが残っていると、更新・削除を止めます。画面に表示されたファイルを確認してください。
+- Xcodeの未保存の編集は検出できません。レビューの更新・終了前に、該当プロジェクトを閉じてください。
+- ビルド・テストではPR内のビルドスクリプトも実行されます。依存関係の準備やTuistなどによるプロジェクト生成は手動です。
+- アプリから選べる実行先はmacOSと既存のiOS Simulatorです。アプリの起動や実機へのインストール、レビュー専用Simulatorの作成には対応していません。
+- アプリを削除する前に、各レビューを終了してください。アプリを削除してもレビュー用フォルダは残ります。
 
-### ビルド・テストする
+更新・削除を止める条件や保存先、環境が残ったときの片付け方は[使い方の詳細](docs/Usage.md)にまとめています。
 
-レビューを選び「ビルド・テスト」の「設定…」からSchemeと実行先を取得して保存します。
-設定は現在のレビューと、そのリポジトリから次に作るレビューの既定値になります。
-実行先はmacOSと利用可能なiOS Simulatorです。実機へのインストールやSimulatorの作成は行いません。
+## 開発
 
-- 「ビルド」「テスト」で明示的に実行します。PR内のビルドスクリプトも実行されます。
-- 依存関係の準備やTuist等のプロジェクト生成は先に手動で行ってください。
-  保存済みのPackage.resolvedを使用し、自動的なパッケージ更新・新たな解決を無効にします。
-  未取得の固定バージョンをダウンロードする場合はあります。
-- 未コミット変更・不明なignoredファイル等がある場合は実行を止めます。
-  実行中にHEADやファイルの変更を検出した場合は成功扱いにしません。
-- 実行中はログの末尾を表示し、全文は専用ファイルへ保存します。中断ボタンで子プロセスも停止します。
-  アプリ終了時はビルドの停止を待ち、Git変更操作は保存・復旧まで完了させます。
-- 結果はSHA・Scheme・実行先・日時付きで保存し、古いSHAの結果を現在の確認結果として扱いません。
-  「ログ」「テスト結果」から保存したログ／xcresultを開けます。
-- DerivedDataと結果は `Builds/<レビューUUID>/` に分離し、レビュー終了時に削除します。
-  Gitによるworktree削除が拒否された場合はビルドデータも残します。
-- 操作はアプリ全体で1つずつ実行し、ビルド中の更新・終了を防ぎます。
-
-状態の保存に失敗した場合は環境や結果を保持し、「状態を再保存」から再試行できます。
-再保存が完了するまではアプリを終了しないでください。
-
-### Firebase設定・ローカル設定をコピーする
-
-登録リポジトリの右にあるコピー設定ボタンから、`GoogleService-Info.plist` や
-ローカルの `.xcconfig` などを追加できます。指定はrepoごとに保存され、次に作るレビュー環境へ
-同じ相対パスでコピーします。設定変更は既存のレビュー環境には適用しません。
-
-- リポジトリ内にある、Gitでignoreされた通常のファイルだけを指定できます。
-  フォルダ、シンボリックリンク、Git管理済みファイル、`.git` 内のファイルは対象外です。
-- コピー先もPRのignore設定に含まれ、まだ存在しないことを確認してからコピーします。
-  コピーには所有者のみ読み書きできる権限を設定します。
-- ファイル内容を更新時にコピーし直すことはありません。コピー時のSHA-256を保存し、
-  コピー元が後から変更されても、レビュー環境の内容を維持します。
-- コピーしたファイルが未変更なら、レビュー終了時にworktreeと一緒に片付けます。
-  編集されていれば更新・終了を止めます。必要な内容を元repo等へ保存したうえで、
-  コピーを元の内容へ戻すか、不要になったコピーを削除してください。
-- 最新PRがコピー先をGit管理したり、親フォルダをファイル／シンボリックリンクに
-  変更した場合は、内容が同じでも更新を止めます。元ファイルを上書きすることはありません。
-- worktreeのロック等で終了に失敗した場合はコピーを残します。ignore対象外になったコピーは
-  削除の間だけ退避し、失敗時に内容・権限を戻します。復元できなかった場合は保管場所を表示します。
-- 設定・コピー記録はMac内のApplication Supportへ保存し、repoには書き込みません。
-  指定したファイルはレビュー環境へローカルコピーするだけで、GitHubへ送信しません。
-
-ターゲットごとにFirebaseのBundle IDが異なる構成では、対応する設定ファイルを指定してください。
-
-GitHub CLIが認証されていてもGitのfetch認証が別途必要な構成があります。
-HTTPS remoteで認証が失敗する場合は `gh auth setup-git`、SSHなら通常のSSH認証を設定してください。
-
-## 動作と保護
-
-- GitHub.comのみ対応。`origin`のURLとPRのowner/repoが一致する登録repoを使用。
-- PRのhead refを一時的な専用refにfetchし、SHAを確認してdetached HEADのworktreeを作成。
-- ローカルrepoの作業ファイルやチェックアウトブランチは切り替えません。
-  Gitオブジェクトとworktree管理情報は共有します。
-- Git hookはこのアプリからのGit操作では無効化。レビュー作成時にビルド・setup scriptは自動実行しません。
-- 同じPRの「レビュー開始」は作成済み環境を再度開きます。追加pushへの自動追従はせず、
-  「最新コミットを取得」で更新します。ブランチは作成せずdetached HEADを維持します。
-  force pushで履歴が変わった場合も最新SHAへ切り替えます。マージ・rebaseは行いません。
-  取得中にPRが変わった場合は切り替えを中止し、再取得を案内します。
-  最新なら「すでに最新のコミットです」と表示します。
-- 更新・削除直前にも確認し、未コミット／未追跡の変更、レビュー中のSHA以降のコミット、ignoredファイルが
-  あれば削除を拒否します。アプリがコピーして内容が変わっていない設定ファイルは例外です。
-  また、`.xcodeproj` / `.xcworkspace` 内の `xcuserdata/<user>.xcuserdatad/`
-  にあるignoredの `UserInterfaceState.xcuserstate` と `xcschemes/xcschememanagement.plist` は
-  Xcodeが生成する状態としてworktreeと一緒に削除します。共有／個人ブレークポイント、
-  カスタムscheme、Git管理されているファイルの変更は保護します。
-  強制削除はありません。その他の不要な生成物はFinder等から手動で削除できます。
-- アプリが作ったUUIDのパス、repoの一致を確認し、`git worktree remove`で削除します。
-- Xcodeの未保存バッファは検出できません。該当プロジェクトを閉じてから終了してください。
-- アプリ専用領域以外のDerivedData、共有SPMキャッシュ、シミュレータは管理・削除しません。
-  同じシミュレータ・Bundle IDでRunすると普段の開発アプリを上書きすることがあります。
-- ファイル単位のローカル設定コピーに対応しています。PodsやTuist等のフォルダのコピー・
-  依存取得・プロジェクト生成のセットアップは手動です。
-
-## 保存先
-
-`~/Library/Application Support/PRReview/state.json` に登録repoとレビュー環境の情報を保存。
-`~/Library/Application Support/PRReview/Worktrees/<UUID>/` にレビュー用worktreeを作成。
-`~/Library/Application Support/PRReview/Builds/<UUID>/` に専用DerivedDataと実行ごとのログ・結果を保存。
-環境が残っている間は登録元repoを移動・削除しないでください。
-
-アプリを削除してもworktreeは自動削除されません。先にアプリから各レビューを終了してください。
-保存に失敗して一覧から見えなくなった環境は、登録元repoで `git worktree list` を確認して
-必要なファイルを保存した上で `git worktree remove <対象パス>` で片付けられます。
-
-## 開発・確認
-
-```sh
-xcodebuild -project PRReview.xcodeproj -scheme PRReview -configuration Debug -derivedDataPath .build/xcode build
-xcodebuild -project PRReview.xcodeproj -scheme PRReview -destination 'platform=macOS' -derivedDataPath .build/xcode test
-./scripts/bundle.sh
-```
-
-テストは一時Git repoと実際のworktreeを使用し、元の未コミット作業を保持した削除、
-変更・未追跡・ignoredファイル・ローカルコミットがある環境の保護、
-偽装した削除パスの拒否、保存状態の読み書きを検証します。
-更新テストはローカルのbare repoにPR形式のrefを作り、fetchとcheckoutを実行。
-GitHubのメタデータとoriginの識別だけを代替し、実際のGitHub通信は行いません。
-Xcodeからは ⌘U で同じテストを実行できます。
-Swift Testingでコマンドのstdout/stderr・中断時の子プロセス終了、ビルドの引数・安全な成果物管理も検証します。
-実Xcode統合テストは一時的な最小プロジェクトをビルド・テストして削除まで確認します。ネットワークやSimulatorは使用しません。
+通常のXcodeプロジェクトとして開発できます。ビルドとテストの手順は[開発・確認](docs/Development.md)、
+コードの責任分担は[Architecture](docs/Architecture.md)を参照してください。
