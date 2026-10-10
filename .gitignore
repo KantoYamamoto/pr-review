@@ -6,6 +6,7 @@ xcuserdata/
 DerivedData/
 build/
 *.xcarchive/
+*.xcresult/
 *.dSYM/
 .env
 .env.*
