@@ -1,12 +1,13 @@
 import Foundation
 import Testing
+import Synchronization
 @testable import PRReview
 
 @Suite("Xcode build workflows")
 struct BuildServiceTests {
     @Test func metadataParsersFilterUnavailableDevicesAndPreserveNames() throws {
-        #expect(try XcodeBuildService.parseSchemes(#"{"workspace":{"schemes":["Z","A","A"]}}"#) == ["A", "Z"])
-        #expect(try XcodeBuildService.parseSchemes(#"{"project":{"schemes":["App"]}}"#) == ["App"])
+        #expect(try XcodeBuildOutput.parseSchemes(#"{"workspace":{"schemes":["Z","A","A"]}}"#) == ["A", "Z"])
+        #expect(try XcodeBuildOutput.parseSchemes(#"{"project":{"schemes":["App"]}}"#) == ["App"])
         let output = """
         Available destinations for the "App" scheme:
           { platform:macOS, arch:arm64, id:MAC, name:My Mac }
@@ -18,12 +19,12 @@ struct BuildServiceTests {
         Ineligible destinations for the "App" scheme:
           { platform:macOS, id:BADMAC, name:Other Mac }
         """
-        let destinations = XcodeBuildService.parseDestinations(output)
+        let destinations = XcodeBuildOutput.parseDestinations(output)
         #expect(destinations.count == 2)
         #expect(destinations.contains(BuildDestination(id: "SIM", name: "iPhone, QA: device", platform: "iOS Simulator")))
         #expect(destinations.contains(BuildDestination(id: "MAC", name: "My Mac", platform: "macOS")))
         // Xcode 27 uses a different section heading and whitespace after the opening brace.
-        #expect(XcodeBuildService.parseDestinations("""
+        #expect(XcodeBuildOutput.parseDestinations("""
             Destinations compatible with the "App" scheme:
                 { platform:macOS, arch:arm64,id:MAC, name:My Mac }
             Destinations incompatible with the "App" scheme:
@@ -155,5 +156,122 @@ private actor BuildInspectionProbe {
     func next() -> InspectionReport {
         calls += 1
         return InspectionReport(blockers: calls == 1 ? [] : [.workingChanges(["M App.swift"])])
+    }
+}
+
+@Suite("Build configuration drafts")
+@MainActor
+struct BuildConfigurationTests {
+    @Test func loadingUsesSavedSelectionAndOnlySaveChangesDefaults() async throws {
+        let fixture = try BuildFixture()
+        defer { fixture.remove() }
+        var session = fixture.session
+        session.repository.buildSettings = fixture.settings
+        var state = SavedState()
+        state.sessions = [session]
+        state.repositories = [session.repository]
+        let store = StateStore(storage: fixture.directory)
+        try store.save(state)
+        let builds = configurationService(fixture: fixture)
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), buildService: builds)
+        let draft = BuildConfigurationModel(session: session, coordinator: coordinator)
+        #expect(draft.settings == nil)
+        await draft.load()
+        #expect(draft.error == nil)
+        #expect(draft.settings == fixture.settings)
+        draft.selectScheme("Other")
+        #expect(draft.destinations.isEmpty)
+        #expect(draft.destinationID.isEmpty)
+        #expect(draft.settings == nil)
+        #expect(!draft.save())
+        #expect(try store.load().repositories.first?.buildSettings == fixture.settings)
+        await draft.loadDestinations()
+        #expect(draft.save())
+        let saved = try store.load()
+        #expect(saved.sessions.first?.repository.buildSettings?.scheme == "Other")
+        #expect(saved.repositories.first?.buildSettings?.scheme == "Other")
+    }
+
+    @Test(arguments: [true, false])
+    func failedReloadClearsCandidatesWithoutChangingStoredSettings(duringSchemeListing: Bool) async throws {
+        let fixture = try BuildFixture()
+        defer { fixture.remove() }
+        var session = fixture.session
+        session.repository.buildSettings = fixture.settings
+        var state = SavedState()
+        state.sessions = [session]
+        state.repositories = [session.repository]
+        let store = StateStore(storage: fixture.directory)
+        try store.save(state)
+        let fail = Mutex(false)
+        let builds = configurationService(fixture: fixture) { arguments in
+            fail.withLock { $0 } && (duringSchemeListing ? arguments.contains("-list") : arguments.contains("-showdestinations"))
+        }
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), buildService: builds)
+        let draft = BuildConfigurationModel(session: session, coordinator: coordinator)
+        await draft.load()
+        #expect(draft.settings == fixture.settings)
+        #expect(!draft.schemes.isEmpty)
+        #expect(!draft.destinations.isEmpty)
+        fail.withLock { $0 = true }
+        await draft.load()
+        #expect(draft.error?.contains("Xcode unavailable") == true)
+        #expect(draft.schemes.isEmpty == duringSchemeListing)
+        #expect(draft.destinations.isEmpty)
+        #expect(draft.settings == nil)
+        #expect(!draft.save())
+        #expect(coordinator.state.sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(try store.load().sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(try store.load().repositories.first?.buildSettings == fixture.settings)
+    }
+
+    @Test func failedSaveKeepsDraftAndStoredDefaultsUntilRetrySucceeds() async throws {
+        let fixture = try BuildFixture()
+        defer { fixture.remove() }
+        var session = fixture.session
+        session.repository.buildSettings = fixture.settings
+        var state = SavedState()
+        state.sessions = [session]
+        state.repositories = [session.repository]
+        let backingStore = StateStore(storage: fixture.directory)
+        try backingStore.save(state)
+        let fail = Mutex(true)
+        let store = StateStore(storage: fixture.directory, save: { next in
+            if fail.withLock({ $0 }) { throw ReviewError("disk unavailable") }
+            try backingStore.save(next)
+        })
+        let coordinator = ReviewCoordinator(service: ReviewService(storage: fixture.directory), store: store,
+                                            buildService: configurationService(fixture: fixture))
+        let draft = BuildConfigurationModel(session: session, coordinator: coordinator)
+        await draft.load()
+        draft.selectScheme("Other")
+        await draft.loadDestinations()
+        let selection = try #require(draft.settings)
+        #expect(selection.scheme == "Other")
+        #expect(!draft.save())
+        #expect(draft.error?.contains("disk unavailable") == true)
+        #expect(draft.settings == selection)
+        #expect(coordinator.state.sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(coordinator.state.repositories.first?.buildSettings == fixture.settings)
+        #expect(try backingStore.load().sessions.first?.repository.buildSettings == fixture.settings)
+        #expect(try backingStore.load().repositories.first?.buildSettings == fixture.settings)
+        fail.withLock { $0 = false }
+        #expect(draft.save())
+        #expect(draft.error == nil)
+        #expect(coordinator.state.sessions.first?.repository.buildSettings == selection)
+        #expect(coordinator.state.repositories.first?.buildSettings == selection)
+        #expect(try backingStore.load().sessions.first?.repository.buildSettings == selection)
+        #expect(try backingStore.load().repositories.first?.buildSettings == selection)
+    }
+
+    private func configurationService(fixture: BuildFixture, shouldFail: @escaping @Sendable ([String]) -> Bool = { _ in false }) -> XcodeBuildService {
+        XcodeBuildService(storage: fixture.directory, command: { _, arguments, _ in
+            if shouldFail(arguments) { throw ReviewError("Xcode unavailable") }
+            let output = arguments.contains("-list") ? #"{"project":{"schemes":["App","Other"]}}"# : """
+            Available destinations for the selected scheme:
+                { platform:iOS Simulator, id:SIM, name:iPhone }
+            """
+            return CommandResult(standardOutput: output, standardError: "", exitCode: 0, terminationDescription: "exited(0)")
+        })
     }
 }

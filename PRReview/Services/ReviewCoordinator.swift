@@ -10,8 +10,8 @@ public final class ReviewCoordinator {
     public private(set) var busy = false
     public private(set) var loadError: String?
     public private(set) var hasUnsavedChanges = false
-    @ObservationIgnored public let service: ReviewService
-    @ObservationIgnored public let buildService: XcodeBuildService
+    @ObservationIgnored private let service: ReviewService
+    @ObservationIgnored private let buildService: XcodeBuildService
     @ObservationIgnored private let store: StateStore
 
     public init(service: ReviewService = ReviewService(), store: StateStore? = nil, buildService: XcodeBuildService? = nil) {
@@ -25,7 +25,7 @@ public final class ReviewCoordinator {
         }
     }
 
-    public func runExclusive<T: Sendable>(operation: @MainActor () async throws -> T) async throws -> T {
+    func runExclusive<T: Sendable>(operation: @MainActor () async throws -> T) async throws -> T {
         guard !busy else { throw ReviewError("別の操作を実行中です。完了してからもう一度お試しください。") }
         if let loadError { throw ReviewError(loadError) }
         busy = true
@@ -69,6 +69,7 @@ public final class ReviewCoordinator {
     public func create(_ pr: PullRequest, repository: Repository) async throws -> Session {
         try await runExclusive {
             if let existing = state.sessions.first(where: { $0.prURL == pr.url }) { return existing }
+            let repository = try currentRepository(repository.id)
             let service = service
             // Do not cancel a transaction after Git begins changing the filesystem.
             // The gate stays held until the task and its recovery work are complete.
@@ -86,6 +87,7 @@ public final class ReviewCoordinator {
     public func update(_ session: Session) async throws -> Session {
         try await runExclusive {
             let index = try currentIndex(session)
+            let session = state.sessions[index]
             let service = service
             let updated = try await Task { try await service.update(session) }.value
             var next = state; next.sessions[index] = updated
@@ -108,14 +110,15 @@ public final class ReviewCoordinator {
 
     public func inspect(_ session: Session) async throws -> InspectionReport {
         try await runExclusive {
-            _ = try currentIndex(session)
-            return try await service.inspect(session)
+            let index = try currentIndex(session)
+            return try await service.inspect(state.sessions[index])
         }
     }
 
     public func remove(_ session: Session) async throws {
         try await runExclusive {
-            _ = try currentIndex(session)
+            let index = try currentIndex(session)
+            let session = state.sessions[index]
             let service = service
             try await Task { try await service.remove(session) }.value
             // Removal cannot be rolled back. Keep in-memory state accurate even if
@@ -134,24 +137,39 @@ public final class ReviewCoordinator {
         }
     }
 
+    public func projectURL(for session: Session) throws -> URL {
+        let index = try currentIndex(session)
+        return try service.entry(for: state.sessions[index])
+    }
+
+    public func relativeCopyPath(_ file: URL, repository: Repository) throws -> String {
+        try service.relativeCopyPath(file, repository: currentRepository(repository.id))
+    }
+
+    public func artifactURL(_ path: String, for session: Session) throws -> URL {
+        let index = try currentIndex(session)
+        return try buildService.validateArtifactURL(path, session: state.sessions[index])
+    }
+
     public func schemes(for session: Session) async throws -> [String] {
         try await runExclusive {
-            _ = try currentIndex(session)
-            return try await buildService.schemes(session)
+            let index = try currentIndex(session)
+            return try await buildService.schemes(state.sessions[index])
         }
     }
 
     public func destinations(for session: Session, scheme: String) async throws -> [BuildDestination] {
         try await runExclusive {
-            _ = try currentIndex(session)
-            return try await buildService.destinations(session, scheme: scheme)
+            let index = try currentIndex(session)
+            return try await buildService.destinations(state.sessions[index], scheme: scheme)
         }
     }
 
     public func runBuild(_ session: Session, settings: BuildSettings, action: BuildAction,
                          onOutput: CommandRunner.OutputHandler? = nil) async throws -> BuildRecord {
         try await runExclusive {
-            _ = try currentIndex(session)
+            let index = try currentIndex(session)
+            let session = state.sessions[index]
             // Builds are cancellable, unlike worktree mutation transactions. The
             // build service waits for subprocess teardown before returning a record.
             let record = try await buildService.run(session, settings: settings, action: action, onOutput: onOutput)
@@ -161,7 +179,7 @@ public final class ReviewCoordinator {
     }
 
     /// Called inside a gated build operation after execution completes.
-    public func recordBuild(_ record: BuildRecord, for session: Session) throws {
+    private func recordBuild(_ record: BuildRecord, for session: Session) throws {
         let index = try currentIndex(session)
         guard record.sha == state.sessions[index].sha else { throw ReviewError("ビルド対象のコミットが変わっています。") }
         state.sessions[index].buildRecords = (state.sessions[index].buildRecords ?? []) + [record]
@@ -176,7 +194,7 @@ public final class ReviewCoordinator {
         let index = try currentIndex(session)
         var next = state
         next.sessions[index].repository.buildSettings = settings
-        if let repositoryIndex = next.repositories.firstIndex(where: { $0.id == session.repository.id }) {
+        if let repositoryIndex = next.repositories.firstIndex(where: { $0.id == state.sessions[index].repository.id }) {
             next.repositories[repositoryIndex].buildSettings = settings
         }
         try persist(next)
@@ -186,6 +204,13 @@ public final class ReviewCoordinator {
         guard !busy else { throw ReviewError("別の操作を実行中です。") }
         if let loadError { throw ReviewError(loadError) }
         try persist(state)
+    }
+
+    private func currentRepository(_ id: UUID) throws -> Repository {
+        guard let repository = state.repositories.first(where: { $0.id == id }) else {
+            throw ReviewError("登録リポジトリが見つかりません。登録を確認してください。")
+        }
+        return repository
     }
 
     private func currentIndex(_ session: Session) throws -> Int {

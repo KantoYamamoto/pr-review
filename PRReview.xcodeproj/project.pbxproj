@@ -5,6 +5,86 @@
 	};
 	"objectVersion" = 56;
 	"objects" = {
+		"3874F93233D449C29F0ABB89" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "XcodeProjectTests.swift";
+			"sourceTree" = "<group>";
+		};
+		"08AFE6C7E19B49CA9C27EC98" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "3874F93233D449C29F0ABB89";
+		};
+		"9AA5DFB2456944D39114BB0B" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "BuildConfigurationModel.swift";
+			"sourceTree" = "<group>";
+		};
+		"55A5B2A171C14F199CC088C4" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "9AA5DFB2456944D39114BB0B";
+		};
+		"FAAED5432EA149A8A347DBBF" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "XcodeBuildOutput.swift";
+			"sourceTree" = "<group>";
+		};
+		"7ED7FB0B300A45F3A3EC2783" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "FAAED5432EA149A8A347DBBF";
+		};
+		"84A49CB77A364CBA9A93D5EE" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "XcodeProject.swift";
+			"sourceTree" = "<group>";
+		};
+		"2655C2C9B55A4ABA80F56A3B" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "84A49CB77A364CBA9A93D5EE";
+		};
+		"1B70C4D505A048D6A4F8445E" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "ReviewPaths.swift";
+			"sourceTree" = "<group>";
+		};
+		"045BAFD263CD432FBC95BB22" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "1B70C4D505A048D6A4F8445E";
+		};
+		"8586C95F493440F4B9F9BB93" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "BuildLog.swift";
+			"sourceTree" = "<group>";
+		};
+		"D39746853E4549D68829A8C3" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "8586C95F493440F4B9F9BB93";
+		};
+		"B69C95DEBABE488690D24B65" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "BuildArtifactStore.swift";
+			"sourceTree" = "<group>";
+		};
+		"69C73B7B667E4CD08DAE6DC4" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "B69C95DEBABE488690D24B65";
+		};
+		"B6689EDAD732475EB0E15087" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "BuildModels.swift";
+			"sourceTree" = "<group>";
+		};
+		"DF6319EFA3A644C88885A2FB" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "B6689EDAD732475EB0E15087";
+		};
 		"2549AAABE1CE236B8F2B2863" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "sourcecode.swift";
@@ -66,6 +146,7 @@
 		"4FCE4BD85B9999775FD26D5D" = {
 			"isa" = "PBXGroup";
 			"children" = (
+				"9AA5DFB2456944D39114BB0B",
 				"166ADF850FA26B515894B0EE",
 				"9EE1EE85AB483434CD05FABE",
 				"1C76A2217C5B5E8B942975E8",
@@ -82,6 +163,7 @@
 		"A8FF10BC02EDC5870483D3E0" = {
 			"isa" = "PBXGroup";
 			"children" = (
+				"3874F93233D449C29F0ABB89",
 				"37AFF7F6E2C99DDB0A089893",
 				"1B636A4246E5BA12ADFABD8F",
 				"2467D606EC1FE0F51F98200A",
@@ -137,6 +219,13 @@
 			"isa" = "PBXSourcesBuildPhase";
 			"buildActionMask" = 2147483647;
 			"files" = (
+				"55A5B2A171C14F199CC088C4",
+				"7ED7FB0B300A45F3A3EC2783",
+				"2655C2C9B55A4ABA80F56A3B",
+				"045BAFD263CD432FBC95BB22",
+				"D39746853E4549D68829A8C3",
+				"69C73B7B667E4CD08DAE6DC4",
+				"DF6319EFA3A644C88885A2FB",
 				"221ED536036FCA2FFE034AF7",
 				"C049DE290CC4B471CFB71DA6",
 				"8102DC739AA4AC0239005FA2",
@@ -177,6 +266,7 @@
 			"isa" = "PBXSourcesBuildPhase";
 			"buildActionMask" = 2147483647;
 			"files" = (
+				"08AFE6C7E19B49CA9C27EC98",
 				"228D986B191712319314EF3D",
 				"FFEFE147C68C05A64DF2F1E8",
 				"E992F4AEF78268B543E4283E",
@@ -481,6 +571,7 @@
 		};
 		"1C76A2217C5B5E8B942975E8" = {
 			"children" = (
+				"B6689EDAD732475EB0E15087",
 				"B2D2ED1D8E18557EA99413C7",
 			);
 			"isa" = "PBXGroup";
@@ -618,6 +709,11 @@
 		};
 		"CC8050BCDB2D39B8EF1E619E" = {
 			"children" = (
+				"FAAED5432EA149A8A347DBBF",
+				"84A49CB77A364CBA9A93D5EE",
+				"1B70C4D505A048D6A4F8445E",
+				"8586C95F493440F4B9F9BB93",
+				"B69C95DEBABE488690D24B65",
 				"07E3875C82CFE7BC514DC7F7",
 				"6F9862F0587DDCB5CFFB69A0",
 				"64DC3E09BF63AE8627F4F8A3",

@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 
 extension ReviewService {
     @concurrent
@@ -12,25 +11,7 @@ extension ReviewService {
         _ = try await git(repository.path, ["worktree", "add", "--detach", path, latest.sha])
         var session = Session(id: id, repository: repository, prURL: pr.url, number: pr.number, title: latest.title, sha: latest.sha, path: path)
         do {
-            // Validate every destination before writing any local configuration.
-            for copy in copies {
-                let destination = try RepositoryFileSafety.file(root: path, relative: copy.path)
-                guard !FileManager.default.fileExists(atPath: destination.path) else {
-                    throw ReviewError("PR内にコピー先が存在します：\(copy.path)")
-                }
-                try await requireIgnoredUntracked(copy.path, root: path)
-            }
-            for copy in copies {
-                let destination = try RepositoryFileSafety.file(root: path, relative: copy.path)
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                _ = try RepositoryFileSafety.file(root: path, relative: copy.path)
-                let descriptor = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
-                guard descriptor >= 0 else { throw ReviewError("コピー先に安全にファイルを作成できません：\(copy.path)") }
-                let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-                do { try handle.write(contentsOf: copy.data); try handle.close() }
-                catch { try? handle.close(); throw error }
-            }
-            session.copiedFiles = copies.map { CopiedFile(path: $0.path, sha256: Self.digest($0.data)) }
+            session.copiedFiles = try await installCopies(copies, at: path)
             return session
         } catch {
             // Only remove the new worktree if Git agrees it is clean. The source
@@ -91,12 +72,8 @@ extension ReviewService {
         guard head == session.sha else { throw ReviewError("手動で別のコミットへ切り替えられています。更新せず環境を残しました。") }
     }
     public func entry(for session: Session) throws -> URL {
-        let root = URL(fileURLWithPath: session.path).resolvingSymlinksInPath()
-        let entry = root.appendingPathComponent(session.repository.entry).resolvingSymlinksInPath()
-        guard entry.path.hasPrefix(root.path + "/"), FileManager.default.fileExists(atPath: entry.path) else {
-            throw ReviewError("このPRには登録したXcodeプロジェクトがありません。Finderで確認してください。")
-        }
-        return entry
+        let root = try ReviewPaths(storage: storage).worktree(for: session)
+        return try XcodeProject(root: root.path, relativePath: session.repository.entry).url
     }
     @concurrent
     public func inspect(_ session: Session) async throws -> InspectionReport {
@@ -132,9 +109,7 @@ extension ReviewService {
     }
     @concurrent
     func validate(_ session: Session) async throws {
-        let expected = worktrees.appendingPathComponent(session.id.uuidString).standardizedFileURL
-        let actual = URL(fileURLWithPath: session.path).standardizedFileURL
-        guard expected == actual, actual.resolvingSymlinksInPath() == actual else { throw ReviewError("管理対象外のパスのため削除を中止しました。") }
+        let actual = try ReviewPaths(storage: storage).worktree(for: session)
         let root = try await git(session.path, ["rev-parse", "--show-toplevel"])
         guard URL(fileURLWithPath: root).standardizedFileURL == actual else { throw ReviewError("worktreeの場所が一致しません。") }
         let original = try await git(session.repository.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])

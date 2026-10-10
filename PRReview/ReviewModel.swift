@@ -1,4 +1,4 @@
-import SwiftUI
+import Foundation
 import Observation
 
 struct ProjectSelection: Identifiable {
@@ -11,7 +11,6 @@ struct ProjectSelection: Identifiable {
 @MainActor @Observable
 final class ReviewModel {
     let coordinator: ReviewCoordinator
-    let builds: XcodeBuildService
     var input = ""
     var activity = "PRのURLを貼り付けて、Xcodeでレビューを始めましょう。"
     var error: String?
@@ -20,12 +19,7 @@ final class ReviewModel {
     var editingRepository: Repository?
     var projectSelection: ProjectSelection?
     var projectSelectionError: String?
-    var configuringBuild: Session?
-    var buildSchemes: [String] = []
-    var buildDestinations: [BuildDestination] = []
-    var buildScheme = ""
-    var buildDestinationID = ""
-    var buildSettingsError: String?
+    var buildConfiguration: BuildConfigurationModel?
     var liveLog = ""
     var runningBuild: UUID?
     var shuttingDown = false
@@ -34,7 +28,6 @@ final class ReviewModel {
 
     init(coordinator: ReviewCoordinator = ReviewCoordinator()) {
         self.coordinator = coordinator
-        self.builds = coordinator.buildService
         error = coordinator.loadError
     }
     var state: SavedState { coordinator.state }
@@ -93,7 +86,7 @@ final class ReviewModel {
             let pr = try PullRequest(self.input)
             if let existing = self.state.sessions.first(where: { $0.prURL == pr.url }) {
                 self.selected = existing.id
-                try await MacIntegration.openXcode(self.coordinator.service.entry(for: existing))
+                try await MacIntegration.openXcode(self.coordinator.projectURL(for: existing))
                 return
             }
             guard let repo = self.state.repositories.first(where: { $0.slug.lowercased() == pr.slug.lowercased() }) else {
@@ -102,7 +95,7 @@ final class ReviewModel {
             let session = try await self.coordinator.create(pr, repository: repo)
             self.selected = session.id; self.input = ""
             self.activity = "レビュー環境を作成しました。"
-            try await MacIntegration.openXcode(self.coordinator.service.entry(for: session))
+            try await MacIntegration.openXcode(self.coordinator.projectURL(for: session))
         }
     }
     func saveCopies(_ repository: Repository, paths: [String], onError: @escaping (String) -> Void) {
@@ -116,7 +109,7 @@ final class ReviewModel {
     }
     func open(_ session: Session) {
         launch("Xcodeで開いています…") {
-            try await MacIntegration.openXcode(self.coordinator.service.entry(for: session))
+            try await MacIntegration.openXcode(self.coordinator.projectURL(for: session))
             self.activity = "Xcodeで開きました。"
         }
     }
@@ -142,41 +135,30 @@ final class ReviewModel {
         }
     }
     func configureBuild(_ session: Session) {
-        configuringBuild = session
-        buildSchemes = []; buildDestinations = []
-        buildScheme = session.repository.buildSettings?.scheme ?? ""
-        buildDestinationID = session.repository.buildSettings?.destination.id ?? ""
-        buildSettingsError = nil
-        launch("Schemeを取得中…") {
-            do {
-                let schemes = try await self.coordinator.schemes(for: session)
-                self.buildSchemes = schemes
-                if !schemes.contains(self.buildScheme) { self.buildScheme = schemes.first ?? "" }
-                if !self.buildScheme.isEmpty {
-                    self.buildDestinations = try await self.coordinator.destinations(for: session, scheme: self.buildScheme)
-                    if !self.buildDestinations.contains(where: { $0.id == self.buildDestinationID }) {
-                        self.buildDestinationID = self.buildDestinations.first?.id ?? ""
-                    }
-                }
-                self.activity = "Schemeと実行先を選択してください。"
-            } catch { self.buildSettingsError = error.localizedDescription }
+        guard !busy else { return }
+        let configuration = BuildConfigurationModel(session: session, coordinator: coordinator)
+        buildConfiguration = configuration
+        reloadBuildConfiguration(configuration)
+    }
+    func reloadBuildConfiguration(_ configuration: BuildConfigurationModel) {
+        launch("Schemeと実行先を取得中…") {
+            await configuration.load()
+            self.activity = "Schemeと実行先を選択してください。"
         }
     }
-    func loadDestinations(_ session: Session) {
-        buildDestinations = []; buildDestinationID = ""; buildSettingsError = nil
-        launch("実行先を取得中…") {
-            do {
-                self.buildDestinations = try await self.coordinator.destinations(for: session, scheme: self.buildScheme)
-                self.buildDestinationID = self.buildDestinations.first?.id ?? ""
-            } catch { self.buildSettingsError = error.localizedDescription }
+    func loadDestinations(_ configuration: BuildConfigurationModel) {
+        launch("実行先を取得中…") { await configuration.loadDestinations() }
+    }
+    func saveBuildSettings(_ configuration: BuildConfigurationModel) {
+        guard !busy else { return }
+        if configuration.save() {
+            buildConfiguration = nil
+            activity = "ビルド設定を保存しました。"
         }
     }
-    func saveBuildSettings(_ session: Session) {
-        guard !busy, let destination = buildDestinations.first(where: { $0.id == buildDestinationID }) else { return }
-        do {
-            try coordinator.saveBuildSettings(BuildSettings(scheme: buildScheme, destination: destination), for: session)
-            configuringBuild = nil; activity = "ビルド設定を保存しました。"
-        } catch { buildSettingsError = error.localizedDescription }
+    func openArtifact(_ path: String, session: Session) {
+        do { MacIntegration.openArtifact(try coordinator.artifactURL(path, for: session)) }
+        catch { self.error = error.localizedDescription }
     }
     func runBuild(_ session: Session, action: BuildAction) {
         guard let settings = session.repository.buildSettings else { configureBuild(session); return }
@@ -201,7 +183,7 @@ final class ReviewModel {
     func shutdown() async -> Bool {
         shuttingDown = true
         MacIntegration.cancelSelection()
-        if runningBuild != nil || configuringBuild != nil { task?.cancel() }
+        if runningBuild != nil || buildConfiguration != nil { task?.cancel() }
         await task?.value
         if coordinator.hasUnsavedChanges {
             do { try coordinator.retrySave() }

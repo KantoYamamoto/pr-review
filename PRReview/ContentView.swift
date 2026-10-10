@@ -69,7 +69,7 @@ struct ContentView: View {
         }
         .sheet(item: $model.editingRepository) { CopySettingsView(model: model, repository: $0) }
         .sheet(item: $model.projectSelection) { ProjectSelectionView(model: model, selection: $0) }
-        .sheet(item: $model.configuringBuild) { BuildSettingsView(model: model, session: $0) }
+        .sheet(item: $model.buildConfiguration) { BuildSettingsView(model: model, configuration: $0) }
         .alert("確認", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("閉じる") { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -122,8 +122,8 @@ struct SessionDetailView: View {
                         HStack {
                             Label("\(record.action.label)：\(record.status.label)", systemImage: record.status == .succeeded ? "checkmark.circle" : "exclamationmark.circle")
                             Spacer()
-                            Button("ログ") { openArtifact(record.logPath) }
-                            if let path = record.resultPath { Button("テスト結果") { openArtifact(path) } }
+                            Button("ログ") { model.openArtifact(record.logPath, session: session) }
+                            if let path = record.resultPath { Button("テスト結果") { model.openArtifact(path, session: session) } }
                         }
                         Text("\(record.sha.prefix(10)) · \(record.configuration.scheme) · \(record.configuration.destination.label)")
                             .font(.caption).foregroundStyle(.secondary)
@@ -136,9 +136,5 @@ struct SessionDetailView: View {
                 Text(session.path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-    private func openArtifact(_ path: String) {
-        do { NSWorkspace.shared.open(try model.builds.validateArtifactURL(path, session: session)) }
-        catch { model.error = error.localizedDescription }
     }
 }
