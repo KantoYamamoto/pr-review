@@ -1,6 +1,6 @@
 import Foundation
 
-/// Xcode metadata and explicitly requested builds. No automatic builds or simulator provisioning.
+/// Xcode metadata, explicitly requested builds, and validated iOS application products.
 public struct XcodeBuildService: Sendable {
     public typealias RunCommand = @Sendable (String, [String], CommandRunner.OutputHandler?) async throws -> CommandResult
     public let storage: URL
@@ -92,6 +92,28 @@ public struct XcodeBuildService: Sendable {
                            date: Date(), logPath: run.log.path,
                            resultPath: FileManager.default.fileExists(atPath: run.result.path) ? run.result.path : nil,
                            sourceModified: sourceModified)
+    }
+
+    @concurrent
+    func simulatorApp(_ session: Session, settings: BuildSettings) async throws -> SimulatorApp {
+        try Task.checkCancellation()
+        try validateScheme(settings.scheme)
+        guard settings.destination.platform == "iOS Simulator", UUID(uuidString: settings.destination.id) != nil else {
+            throw ReviewError("iOS Simulatorを選択してください。")
+        }
+        let derived = try artifacts.artifacts(for: session.id).appendingPathComponent("DerivedData")
+        let arguments = try ["xcodebuild"] + containerArguments(session) + packageOptions + [
+            "-scheme", settings.scheme, "-destination", "platform=iOS Simulator,id=\(settings.destination.id)",
+            "-derivedDataPath", derived.path, "-showBuildSettings", "-json"
+        ]
+        let result = try await command("xcrun", arguments, nil)
+        try requireSuccess(result)
+        let app = try SimulatorProduct.resolve(result.standardOutput, derivedData: derived)
+        let report = try await inspect(session)
+        guard report.isEmpty, try await git(session, ["rev-parse", "HEAD"]) == session.sha else {
+            throw ReviewError("アプリの確認中にレビュー環境が変更されました。インストールを中止しました。")
+        }
+        return app
     }
 
     public func removeArtifacts(for session: Session) throws {

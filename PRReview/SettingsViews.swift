@@ -95,7 +95,7 @@ struct BuildSettingsView: View {
                 }
                 Button("実行先を取得") { model.loadDestinations(configuration) }.disabled(configuration.scheme.isEmpty || model.busy)
             }.disabled(model.busy)
-            Text("macOSとiOS Simulatorに対応します。実機へのインストールやSimulatorの作成は行いません。")
+            Text("macOSとiOS Simulatorに対応します。「Simulatorで起動」は、選択した端末と同じ機種・OSの専用Simulatorを新規作成・再利用します。実機にはインストールしません。")
                 .font(.caption).foregroundStyle(.secondary)
             if model.busy { ProgressView().controlSize(.small) }
             if let error = configuration.error { ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled) }.frame(maxHeight: 160) }

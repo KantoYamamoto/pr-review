@@ -51,6 +51,19 @@ enum MacIntegration {
         NSWorkspace.shared.open(url)
     }
 
+    static func openSimulator(deviceID: String) async throws {
+        guard UUID(uuidString: deviceID) != nil else { throw ReviewError("SimulatorのIDが不正です。") }
+        let developer = URL(fileURLWithPath: try await CommandRunner.run("xcode-select", ["-p"]))
+        let simulator = developer.appendingPathComponent("Applications/Simulator.app")
+        let hub = developer.deletingLastPathComponent().appendingPathComponent("Applications/DeviceHub.app")
+        let useHub = !FileManager.default.fileExists(atPath: simulator.path)
+        let app = useHub ? hub : simulator
+        guard FileManager.default.fileExists(atPath: app.path) else { throw ReviewError("選択中のXcodeにSimulatorの表示アプリが見つかりません。") }
+        let configuration = NSWorkspace.OpenConfiguration()
+        if !useHub { configuration.arguments = ["-CurrentDeviceUDID", deviceID] }
+        _ = try await NSWorkspace.shared.openApplication(at: app, configuration: configuration)
+    }
+
     static func openXcode(_ entry: URL) async throws {
         guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") else {
             throw ReviewError("Xcodeが見つかりません。")

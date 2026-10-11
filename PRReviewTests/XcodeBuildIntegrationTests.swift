@@ -56,10 +56,10 @@ struct XcodeBuildIntegrationTests {
 }
 
 /// A small real Xcode project with no packages, signing account, or application host.
-private enum SmokeProject {
+enum SmokeProject {
     static let toolSource = "print(\"Review smoke fixture\")\n"
 
-    static func write(to root: URL) throws {
+    static func write(to root: URL, iOS: Bool = false) throws {
         var objects: [String: [String: Any]] = [:]
         var counter = 0
         func object(_ values: [String: Any]) -> String {
@@ -70,10 +70,16 @@ private enum SmokeProject {
         }
         func configurations(_ extra: [String: Any] = [:]) -> String {
             var settings: [String: Any] = [
-                "SDKROOT": "macosx", "MACOSX_DEPLOYMENT_TARGET": "26.0", "SWIFT_VERSION": "6.0",
+                "SDKROOT": iOS ? "iphonesimulator" : "macosx", "IPHONEOS_DEPLOYMENT_TARGET": "26.0", "MACOSX_DEPLOYMENT_TARGET": "26.0", "SWIFT_VERSION": "6.0",
                 "SWIFT_OPTIMIZATION_LEVEL": "-Onone", "ONLY_ACTIVE_ARCH": "YES",
                 "CODE_SIGN_IDENTITY": "-", "CODE_SIGN_STYLE": "Manual", "PRODUCT_NAME": "$(TARGET_NAME)"
             ]
+            if iOS {
+                settings["GENERATE_INFOPLIST_FILE"] = "YES"
+                settings["PRODUCT_BUNDLE_IDENTIFIER"] = "dev.fixture.review-simulator"
+                settings["TARGETED_DEVICE_FAMILY"] = "1,2"
+                settings["INFOPLIST_KEY_UILaunchScreen_Generation"] = "YES"
+            }
             settings.merge(extra) { _, new in new }
             let debug = object(["isa": "XCBuildConfiguration", "name": "Debug", "buildSettings": settings])
             return object(["isa": "XCConfigurationList", "buildConfigurations": [debug], "defaultConfigurationIsVisible": "0", "defaultConfigurationName": "Debug"])
@@ -83,14 +89,14 @@ private enum SmokeProject {
             let buildFile = object(["isa": "PBXBuildFile", "fileRef": reference])
             return object(["isa": "PBXSourcesBuildPhase", "buildActionMask": "2147483647", "files": [buildFile], "runOnlyForDeploymentPostprocessing": "0"])
         }
-        let tool = object(["isa": "PBXFileReference", "path": "SmokeTool", "sourceTree": "BUILT_PRODUCTS_DIR", "explicitFileType": "compiled.mach-o.executable"])
+        let tool = object(["isa": "PBXFileReference", "path": iOS ? "SmokeTool.app" : "SmokeTool", "sourceTree": "BUILT_PRODUCTS_DIR", "explicitFileType": iOS ? "wrapper.application" : "compiled.mach-o.executable"])
         let tests = object(["isa": "PBXFileReference", "path": "SmokeTests.xctest", "sourceTree": "BUILT_PRODUCTS_DIR", "explicitFileType": "wrapper.cfbundle"])
         let products = object(["isa": "PBXGroup", "name": "Products", "children": [tool, tests], "sourceTree": "<group>"])
         let mainGroup = object(["isa": "PBXGroup", "children": [products], "sourceTree": "<group>"])
         let toolTarget = object([
             "isa": "PBXNativeTarget", "name": "SmokeTool", "productName": "SmokeTool", "productReference": tool,
-            "productType": "com.apple.product-type.tool", "buildConfigurationList": configurations(),
-            "buildPhases": [sourcePhase("main.swift")], "buildRules": [], "dependencies": []
+            "productType": iOS ? "com.apple.product-type.application" : "com.apple.product-type.tool", "buildConfigurationList": configurations(),
+            "buildPhases": [sourcePhase(iOS ? "App.swift" : "main.swift")], "buildRules": [], "dependencies": []
         ])
         let testTarget = object([
             "isa": "PBXNativeTarget", "name": "SmokeTests", "productName": "SmokeTests", "productReference": tests,
@@ -118,14 +124,15 @@ private enum SmokeProject {
         <?xml version="1.0" encoding="UTF-8"?>
         <Scheme version="1.3">
         <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries>
-        <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">\(reference(toolTarget, name: "SmokeTool", product: "SmokeTool"))</BuildActionEntry>
+        <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">\(reference(toolTarget, name: "SmokeTool", product: iOS ? "SmokeTool.app" : "SmokeTool"))</BuildActionEntry>
         </BuildActionEntries></BuildAction>
         <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB"><Testables><TestableReference skipped="NO">\(reference(testTarget, name: "SmokeTests", product: "SmokeTests.xctest"))</TestableReference></Testables></TestAction>
         <LaunchAction buildConfiguration="Debug"/><AnalyzeAction buildConfiguration="Debug"/>
         </Scheme>
         """
         try Data(scheme.utf8).write(to: schemeRoot.appendingPathComponent("Smoke.xcscheme"))
-        try Data(toolSource.utf8).write(to: root.appendingPathComponent("main.swift"))
+        let appSource = "import SwiftUI\n@main struct SmokeApp: App { var body: some Scene { WindowGroup { Text(\"Review Simulator fixture\") } } }\n"
+        try Data((iOS ? appSource : toolSource).utf8).write(to: root.appendingPathComponent(iOS ? "App.swift" : "main.swift"))
         let testSource = "import XCTest\nfinal class SmokeTests: XCTestCase { func testFixture() { XCTAssertEqual(2 + 2, 4) } }\n"
         try Data(testSource.utf8).write(to: root.appendingPathComponent("SmokeTests.swift"))
         try Data("xcuserdata/\n*.xcuserstate\n".utf8).write(to: root.appendingPathComponent(".gitignore"))

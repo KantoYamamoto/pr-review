@@ -13,9 +13,11 @@ public final class ReviewCoordinator {
     @ObservationIgnored private let service: ReviewService
     @ObservationIgnored private let buildService: XcodeBuildService
     @ObservationIgnored private let store: StateStore
+    @ObservationIgnored private let simulatorService: SimulatorService
 
-    public init(service: ReviewService = ReviewService(), store: StateStore? = nil, buildService: XcodeBuildService? = nil) {
+    public init(service: ReviewService = ReviewService(), store: StateStore? = nil, buildService: XcodeBuildService? = nil, simulatorService: SimulatorService = SimulatorService()) {
         self.service = service
+        self.simulatorService = simulatorService
         self.store = store ?? service.stateStore
         self.buildService = buildService ?? XcodeBuildService(storage: service.storage)
         do { state = try self.store.load() }
@@ -115,7 +117,7 @@ public final class ReviewCoordinator {
         }
     }
 
-    public func remove(_ session: Session) async throws {
+    public func remove(_ session: Session, keepSimulators: Bool = false) async throws {
         try await runExclusive {
             let index = try currentIndex(session)
             let session = state.sessions[index]
@@ -133,6 +135,12 @@ public final class ReviewCoordinator {
             let buildService = buildService
             do { try await Task { try await buildService.cleanupArtifacts(for: session) }.value }
             catch { errors.append("ビルドデータの削除に失敗しました。データは保持しています。\n\(error.localizedDescription)") }
+            if !keepSimulators {
+                for owned in state.simulators ?? [] where owned.sessionID == session.id {
+                    do { try await deleteSimulator(owned) }
+                    catch { errors.append("専用Simulatorを保持しています。「専用Simulatorの管理…」から再試行してください。\n\(error.localizedDescription)") }
+                }
+            }
             if !errors.isEmpty { throw ReviewError("レビュー環境は削除しました。\n" + errors.joined(separator: "\n\n")) }
         }
     }
@@ -176,6 +184,80 @@ public final class ReviewCoordinator {
             try recordBuild(record, for: session)
             return record
         }
+    }
+
+    public func runOnSimulator(_ session: Session, onOutput: CommandRunner.OutputHandler? = nil) async throws -> SimulatorLaunchResult {
+        try await runExclusive {
+            let session = state.sessions[try currentIndex(session)]
+            guard let settings = session.repository.buildSettings else { throw ReviewError("Schemeと実行先を保存してください。") }
+            var record = SimulatorLaunchRecord(sha: session.sha, status: .failed, message: "")
+            var deviceID: String?
+            do {
+                let template = try await simulatorService.configuration(for: session, destination: settings.destination)
+                let owned = (state.simulators ?? []).first {
+                    $0.sessionID == session.id && $0.deviceType == template.deviceType && $0.runtime == template.runtime
+                } ?? template
+                record.simulatorName = owned.name
+                await onOutput?("ビルドを開始します…\n")
+                let build = try await buildService.run(session, settings: settings, action: .build, onOutput: onOutput)
+                record.buildID = build.id
+                try recordBuild(build, for: session)
+                if build.status == .cancelled { throw CancellationError() }
+                guard build.status == .succeeded else { throw ReviewError("ビルドに失敗しました。ビルド履歴のログを確認してください。インストールと起動は行っていません。") }
+                let app = try await buildService.simulatorApp(session, settings: settings)
+                try Task.checkCancellation()
+                if !(state.simulators ?? []).contains(where: { $0.id == owned.id }) {
+                    var next = state
+                    next.simulators = (next.simulators ?? []) + [owned]
+                    // Save the intent before simctl create. A crash after creation can
+                    // recover the device by its exact random name on the next attempt.
+                    try persist(next)
+                }
+                let simulators = simulatorService
+                await onOutput?("\nレビュー専用Simulatorを準備中…\n")
+                let id = try await Task { try await simulators.ensureDevice(owned) }.value
+                var identified = owned
+                identified.deviceID = id
+                if let index = state.simulators?.firstIndex(where: { $0.id == owned.id }) {
+                    state.simulators?[index] = identified
+                    do { try persist(state) }
+                    catch { hasUnsavedChanges = true; throw error }
+                }
+                try Task.checkCancellation()
+                try await simulators.launch(app, on: identified, deviceID: id, onOutput: onOutput)
+                deviceID = id
+                record.status = .succeeded
+                record.message = "レビュー専用Simulatorで起動しました。"
+            } catch is CancellationError {
+                record.status = .cancelled
+                record.message = "起動操作を中断しました。作成済みの専用Simulatorは再利用できます。"
+            } catch {
+                record.status = Task.isCancelled ? .cancelled : .failed
+                record.message = error.localizedDescription
+            }
+            let index = try currentIndex(session)
+            state.sessions[index].simulatorLaunches = (state.sessions[index].simulatorLaunches ?? []) + [record]
+            do { try persist(state) }
+            catch { hasUnsavedChanges = true; throw error }
+            return SimulatorLaunchResult(record: record, deviceID: deviceID)
+        }
+    }
+
+    public func removeSimulator(_ id: UUID) async throws {
+        try await runExclusive {
+            guard let owned = state.simulators?.first(where: { $0.id == id }) else {
+                throw ReviewError("専用Simulatorの作成記録がありません。")
+            }
+            try await deleteSimulator(owned)
+        }
+    }
+
+    private func deleteSimulator(_ owned: ManagedSimulator) async throws {
+        let simulators = simulatorService
+        try await Task { try await simulators.remove(owned) }.value
+        state.simulators?.removeAll { $0.id == owned.id }
+        do { try persist(state) }
+        catch { hasUnsavedChanges = true; throw error }
     }
 
     /// Called inside a gated build operation after execution completes.
