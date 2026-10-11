@@ -140,6 +140,129 @@ struct SimulatorServiceTests {
         #expect((try backing.load().simulators ?? []).isEmpty)
     }
 
+    @Test(arguments: [false, true]) @MainActor
+    func failedDeviceIDSaveRecoversWithoutCreatingAnotherDevice(restart: Bool) async throws {
+        let fixture = try SimulatorFixture()
+        defer { fixture.remove() }
+        let probe = SimulatorProbe(intentStorage: fixture.directory)
+        _ = try fixture.coordinator(probe: probe)
+        let backing = StateStore(storage: fixture.directory)
+        let failSave = Mutex(true)
+        let store = StateStore(storage: fixture.directory, save: { state in
+            if state.simulators?.contains(where: { $0.deviceID != nil }) == true,
+               failSave.withLock({ $0 }) { throw ReviewError("device ID save failed") }
+            try backing.save(state)
+        })
+        let coordinator = fixture.makeCoordinator(probe: probe, store: store)
+        await #expect(throws: ReviewError.self) { try await coordinator.runOnSimulator(fixture.session) }
+        let owned = try #require(coordinator.state.simulators?.first)
+        #expect(owned.deviceID == SimulatorProbe.ownedID)
+        #expect(coordinator.hasUnsavedChanges)
+        let savedIntent = try #require(backing.load().simulators?.first)
+        #expect(savedIntent.id == owned.id)
+        #expect(savedIntent.deviceID == nil)
+        #expect(!((await probe.commands).contains { $0.contains("install") || $0.contains("launch") }))
+
+        failSave.withLock { $0 = false }
+        let recovered: ReviewCoordinator
+        if restart {
+            recovered = try fixture.coordinator(probe: probe, initialize: false)
+        } else {
+            try coordinator.retrySave()
+            #expect(!coordinator.hasUnsavedChanges)
+            #expect(try backing.load().simulators?.first?.deviceID == SimulatorProbe.ownedID)
+            recovered = coordinator
+        }
+        let result = try await recovered.runOnSimulator(fixture.session)
+        #expect(result.record.status == .succeeded)
+        #expect(result.deviceID == SimulatorProbe.ownedID)
+        #expect(try backing.load().simulators?.first?.deviceID == SimulatorProbe.ownedID)
+        let commands = await probe.commands
+        #expect(commands.filter { $0.contains("create") }.count == 1)
+        expectOnlyOwnedDeviceMutations(commands)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func failedSaveAfterDeletionRecoversWithoutDeletingAgain(restart: Bool) async throws {
+        let fixture = try SimulatorFixture()
+        defer { fixture.remove() }
+        let probe = SimulatorProbe()
+        let initial = try fixture.coordinator(probe: probe)
+        #expect(try await initial.runOnSimulator(fixture.session).record.status == .succeeded)
+        let owned = try #require(initial.state.simulators?.first)
+        let backing = StateStore(storage: fixture.directory)
+        let failSave = Mutex(true)
+        let store = StateStore(storage: fixture.directory, save: { state in
+            if state.simulators?.isEmpty == true, failSave.withLock({ $0 }) {
+                throw ReviewError("deleted device state save failed")
+            }
+            try backing.save(state)
+        })
+        let coordinator = fixture.makeCoordinator(probe: probe, store: store)
+        await #expect(throws: ReviewError.self) { try await coordinator.removeSimulator(owned.id) }
+        #expect(coordinator.state.simulators?.isEmpty == true)
+        #expect(coordinator.hasUnsavedChanges)
+        #expect(await probe.ownedName == nil)
+        #expect(try backing.load().simulators?.first == owned)
+
+        failSave.withLock { $0 = false }
+        if restart {
+            let recovered = try fixture.coordinator(probe: probe, initialize: false)
+            try await recovered.removeSimulator(owned.id)
+            #expect(recovered.state.simulators?.isEmpty == true)
+        } else {
+            try coordinator.retrySave()
+            #expect(!coordinator.hasUnsavedChanges)
+        }
+        #expect(try backing.load().simulators?.isEmpty == true)
+        let commands = await probe.commands
+        #expect(commands.filter { $0.contains("delete") }.count == 1)
+        #expect(commands.filter { $0.contains("create") }.count == 1)
+        expectOnlyOwnedDeviceMutations(commands)
+    }
+
+    @Test(.timeLimit(.minutes(1))) @MainActor
+    func cancellationDuringCreationWaitsForOwnershipSaveAndAllowsReuse() async throws {
+        let fixture = try SimulatorFixture()
+        defer { fixture.remove() }
+        let gate = SimulatorCreationGate()
+        let probe = SimulatorProbe(intentStorage: fixture.directory, creationGate: gate)
+        let coordinator = try fixture.coordinator(probe: probe)
+        let operation = Task { try await coordinator.runOnSimulator(fixture.session) }
+        do {
+            try await gate.waitUntilEntered()
+            let savedIntent = try #require(StateStore(storage: fixture.directory).load().simulators?.first)
+            #expect(savedIntent.deviceID == nil)
+            operation.cancel()
+            #expect(coordinator.busy)
+            await #expect(throws: ReviewError.self) { try await coordinator.removeSimulator(savedIntent.id) }
+            #expect(!((await probe.commands).contains { $0.contains("install") || $0.contains("delete") }))
+            await gate.release()
+
+            let result = try await operation.value
+            #expect(result.record.status == .cancelled)
+            #expect(result.deviceID == nil)
+            #expect(!coordinator.busy)
+            let saved = try StateStore(storage: fixture.directory).load()
+            #expect(saved.simulators?.first?.deviceID == SimulatorProbe.ownedID)
+            #expect(saved.sessions.first?.simulatorLaunches?.last?.status == .cancelled)
+            #expect(!((await probe.commands).contains { $0.contains("install") || $0.contains("launch") }))
+
+            let recovered = try fixture.coordinator(probe: probe, initialize: false)
+            let next = try await recovered.runOnSimulator(fixture.session)
+            #expect(next.record.status == .succeeded)
+            #expect(next.deviceID == SimulatorProbe.ownedID)
+            let commands = await probe.commands
+            #expect(commands.filter { $0.contains("create") }.count == 1)
+            expectOnlyOwnedDeviceMutations(commands)
+        } catch {
+            await gate.release()
+            operation.cancel()
+            _ = try? await operation.value
+            throw error
+        }
+    }
+
     @Test func builtProductsRejectOutsidePathsSymlinksAndAmbiguousApps() throws {
         let fixture = try SimulatorFixture()
         defer { fixture.remove() }
@@ -163,6 +286,12 @@ struct SimulatorServiceTests {
         let state = try JSONDecoder().decode(SavedState.self, from: data)
         #expect(state.simulators == nil)
     }
+}
+
+private func expectOnlyOwnedDeviceMutations(_ commands: [[String]]) {
+    let mutations = commands.filter { $0.first == "simctl" && !$0.contains("list") && !$0.contains("create") }
+    #expect(mutations.allSatisfy { $0.contains(SimulatorProbe.ownedID) && !$0.contains(SimulatorProbe.templateID) })
+    #expect(!commands.contains { $0.contains("all") || $0.contains("booted") || $0.contains("erase") || $0.contains("clone") })
 }
 
 private struct SimulatorFixture: Sendable {
@@ -220,7 +349,10 @@ private actor SimulatorProbe {
     var booted = false
     let failing: String?
     let intentStorage: URL?
-    init(failing: String? = nil, intentStorage: URL? = nil) { self.failing = failing; self.intentStorage = intentStorage }
+    let creationGate: SimulatorCreationGate?
+    init(failing: String? = nil, intentStorage: URL? = nil, creationGate: SimulatorCreationGate? = nil) {
+        self.failing = failing; self.intentStorage = intentStorage; self.creationGate = creationGate
+    }
     func renameOwned(_ name: String) { ownedName = name }
     func run(_ name: String, _ args: [String], _ output: CommandRunner.OutputHandler?) async throws -> CommandResult {
         commands.append(args)
@@ -247,6 +379,7 @@ private actor SimulatorProbe {
                     throw ReviewError("Creation without a saved ownership intent")
                 }
             }
+            await creationGate?.pause()
             return Self.result(Self.ownedID)
         }
         if args.contains("bootstatus") { booted = true }
@@ -257,5 +390,45 @@ private actor SimulatorProbe {
     }
     static func result(_ text: String, code: Int32 = 0) -> CommandResult {
         CommandResult(standardOutput: text, standardError: "", exitCode: code, terminationDescription: "exit \(code)")
+    }
+}
+
+/// A cancellation-insensitive creation command, released explicitly by the test.
+private actor SimulatorCreationGate {
+    private var entered = false
+    private var released = false
+    private var entryWaiter: CheckedContinuation<Void, any Error>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func waitUntilEntered() async throws {
+        try Task.checkCancellation()
+        if entered { return }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                else { entryWaiter = continuation }
+            }
+        } onCancel: {
+            Task { await self.cancelEntryWaiter() }
+        }
+    }
+
+    private func cancelEntryWaiter() {
+        entryWaiter?.resume(throwing: CancellationError())
+        entryWaiter = nil
+    }
+
+    func pause() async {
+        entered = true
+        entryWaiter?.resume()
+        entryWaiter = nil
+        if released { return }
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
 }
