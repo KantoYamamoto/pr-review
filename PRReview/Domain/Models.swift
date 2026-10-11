@@ -57,6 +57,7 @@ public struct Session: Codable, Identifiable, Equatable, Sendable {
     public var updatedAt: Date?
     public var copiedFiles: [CopiedFile]?
     public var buildRecords: [BuildRecord]?
+    public var simulatorLaunches: [SimulatorLaunchRecord]?
     public init(id: UUID, repository: Repository, prURL: String, number: Int, title: String, sha: String, path: String) {
         self.id = id; self.repository = repository; self.prURL = prURL; self.number = number
         self.title = title; self.sha = sha; self.path = path; self.createdAt = Date()
@@ -66,6 +67,7 @@ public struct Session: Codable, Identifiable, Equatable, Sendable {
 public struct SavedState: Codable, Sendable {
     public var repositories: [Repository] = []
     public var sessions: [Session] = []
+    public var simulators: [ManagedSimulator]?
     public init() {}
 }
 

@@ -16,6 +16,7 @@ final class ReviewModel {
     var error: String?
     var selected: UUID?
     var removal: Session?
+    var managingSimulators = false
     var editingRepository: Repository?
     var projectSelection: ProjectSelection?
     var projectSelectionError: String?
@@ -127,9 +128,9 @@ final class ReviewModel {
             self.activity = updated.sha == session.sha ? "すでに最新のコミットです。" : "最新コミット（\(updated.sha.prefix(10))）に更新しました。"
         }
     }
-    func remove(_ session: Session) {
+    func remove(_ session: Session, keepSimulators: Bool = false) {
         launch("レビュー環境とビルドデータを削除中…") {
-            try await self.coordinator.remove(session)
+            try await self.coordinator.remove(session, keepSimulators: keepSimulators)
             self.selected = nil; self.liveLog = ""
             self.activity = "レビュー環境を削除しました。"
         }
@@ -169,6 +170,26 @@ final class ReviewModel {
                 await self.appendLog(output)
             }
             self.activity = "\(record.action.label)：\(record.status.label)"
+        }
+    }
+    func runOnSimulator(_ session: Session) {
+        guard session.repository.buildSettings != nil else { configureBuild(session); return }
+        launch("Simulatorで起動中…") {
+            self.runningBuild = session.id; self.liveLog = ""
+            defer { self.runningBuild = nil }
+            let result = try await self.coordinator.runOnSimulator(session) { await self.appendLog($0) }
+            self.activity = "Simulator起動：\(result.record.status.label)"
+            if result.record.status == .failed { self.error = result.record.message }
+            if let deviceID = result.deviceID {
+                do { try await MacIntegration.openSimulator(deviceID: deviceID) }
+                catch { self.error = "アプリは起動しましたが、Simulatorの画面を開けませんでした。XcodeからDevice HubまたはSimulatorを開いてください。\n\(error.localizedDescription)" }
+            }
+        }
+    }
+    func removeSimulator(_ owned: ManagedSimulator) {
+        launch("専用Simulatorを削除中…") {
+            try await self.coordinator.removeSimulator(owned.id)
+            self.activity = "専用Simulatorを削除しました。"
         }
     }
     private func appendLog(_ output: String) {

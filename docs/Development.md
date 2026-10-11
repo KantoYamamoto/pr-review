@@ -47,4 +47,15 @@ xcodebuild -project PRReview.xcodeproj -scheme PRReview -destination 'platform=m
 GitHubのメタデータとoriginの識別だけを代替し、実際のGitHub通信は行いません。
 Xcodeからは ⌘U で同じテストを実行できます。
 Swift Testingでコマンドのstdout/stderr・中断時の子プロセス終了、ビルドの引数・安全な成果物管理も検証します。
-実Xcode統合テストは一時的な最小プロジェクトをビルド・テストして削除まで確認します。ネットワークやSimulatorは使用しません。
+通常の実Xcode統合テストは一時的な最小macOSプロジェクトをビルド・テストして削除まで確認します。ネットワークやSimulatorは使用しません。
+
+Simulatorの実動作を確認するには、iOS 26以降のruntimeと対応する端末をXcodeで用意し、以下を実行します。
+既存端末は機種・OSの参照にだけ使用し、新しい専用端末でビルド・起動・再利用・保持・削除を検証します。
+
+```sh
+TEST_RUNNER_PRREVIEW_SIMULATOR_INTEGRATION=1 xcodebuild -project PRReview.xcodeproj -scheme PRReview \
+  -destination 'platform=macOS' -derivedDataPath .build/xcode \
+  -only-testing:PRReviewTests/SimulatorIntegrationTests test
+```
+
+runtime不足、ビルド・インストール・起動失敗、保存失敗、所有情報の不一致は、通常のテストでコマンドの代替処理を使って確認します。

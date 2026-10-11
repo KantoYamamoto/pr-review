@@ -26,6 +26,9 @@ struct ContentView: View {
                     }
                     Button("リポジトリ登録", systemImage: "folder.badge.plus") { model.addRepository() }.disabled(model.busy)
                 }
+                Section("専用Simulator") {
+                    Button("専用Simulatorの管理…", systemImage: "iphone") { model.managingSimulators = true }.disabled(model.busy)
+                }
             }.navigationTitle("PR Review")
                 .navigationSplitViewColumnWidth(min: 230, ideal: 280)
         } detail: {
@@ -69,16 +72,22 @@ struct ContentView: View {
         }
         .sheet(item: $model.editingRepository) { CopySettingsView(model: model, repository: $0) }
         .sheet(item: $model.projectSelection) { ProjectSelectionView(model: model, selection: $0) }
+        .sheet(isPresented: $model.managingSimulators) { SimulatorManagementView(model: model) }
         .sheet(item: $model.buildConfiguration) { BuildSettingsView(model: model, configuration: $0) }
         .alert("確認", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("閉じる") { model.error = nil }
         } message: { Text(model.error ?? "") }
         .confirmationDialog("レビュー環境を削除しますか？", isPresented: Binding(get: { model.removal != nil }, set: { if !$0 { model.removal = nil } }), titleVisibility: .visible) {
-            Button("環境を削除", role: .destructive) {
+            if let session = model.removal, (model.state.simulators ?? []).contains(where: { $0.sessionID == session.id }) {
+                Button("専用Simulatorを残して終了") {
+                    model.removal = nil; model.remove(session, keepSimulators: true)
+                }
+            }
+            Button((model.state.simulators ?? []).contains { $0.sessionID == model.removal?.id } ? "専用Simulatorも削除して終了" : "環境を削除", role: .destructive) {
                 if let session = model.removal { model.removal = nil; model.remove(session) }
             }
         } message: {
-            Text("このPR用のworktree、未変更のコピー設定、Xcodeの画面状態、専用ビルドデータを削除します。Xcodeの該当プロジェクトを閉じ、未保存の編集がないことを確認してください。")
+            Text("このPR用のworktree、未変更のコピー設定、Xcodeの画面状態、専用ビルドデータを削除します。専用Simulatorを削除すると、その端末のアプリとデータも消去します。残した端末は「専用Simulatorの管理…」から削除できます。Xcodeの該当プロジェクトを閉じ、未保存の編集がないことを確認してください。")
         }
     }
 }
@@ -99,7 +108,7 @@ struct SessionDetailView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 Divider()
                 HStack {
-                    Text("ビルド・テスト").font(.headline)
+                    Text("ビルド・テスト・起動").font(.headline)
                     Spacer()
                     Button("設定…", systemImage: "slider.horizontal.3") { model.configureBuild(session) }.disabled(model.busy)
                 }
@@ -108,6 +117,9 @@ struct SessionDetailView: View {
                     HStack {
                         Button("ビルド", systemImage: "hammer.fill") { model.runBuild(session, action: .build) }.buttonStyle(.borderedProminent)
                         Button("テスト", systemImage: "testtube.2") { model.runBuild(session, action: .test) }
+                        if settings.destination.platform == "iOS Simulator" {
+                            Button("Simulatorで起動", systemImage: "play.fill") { model.runOnSimulator(session) }
+                        }
                     }.disabled(model.busy)
                 } else { Text("「設定…」でSchemeと実行先を選択してください。").foregroundStyle(.secondary) }
                 Text("選択したPRのビルドスクリプトを実行します。依存関係の準備・プロジェクト生成が必要な場合は先にXcode等で行ってください。")
@@ -116,6 +128,18 @@ struct SessionDetailView: View {
                     HStack { ProgressView().controlSize(.small); Text("実行中…"); Spacer(); Button("中断") { model.cancelBuild() } }
                     Text(model.liveLog.isEmpty ? "ログを待っています…" : model.liveLog)
                         .font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if let record = session.simulatorLaunches?.last {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Simulator起動：\(record.status.label)").font(.headline)
+                        Text(record.message).textSelection(.enabled)
+                        if let name = record.simulatorName { Text(name).font(.caption).textSelection(.enabled) }
+                        Text("\(record.sha.prefix(10)) · \(record.date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                        if record.sha != session.sha { Text("過去のコミットの起動結果です。").font(.caption).foregroundStyle(.orange) }
+                        if record.status == .succeeded {
+                            Text("Xcode 27ではDevice Hubの一覧から上記の端末を選んで画面を開いてください。").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 ForEach((session.buildRecords ?? []).reversed()) { record in
                     VStack(alignment: .leading, spacing: 5) {
