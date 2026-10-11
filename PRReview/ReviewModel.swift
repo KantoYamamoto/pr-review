@@ -12,7 +12,7 @@ struct ProjectSelection: Identifiable {
 final class ReviewModel {
     let coordinator: ReviewCoordinator
     var input = ""
-    var activity = "PRのURLを貼り付けて、Xcodeでレビューを始めましょう。"
+    var activity = "待機中"
     var error: String?
     var selected: UUID?
     var removal: Session?
@@ -88,6 +88,7 @@ final class ReviewModel {
             if let existing = self.state.sessions.first(where: { $0.prURL == pr.url }) {
                 self.selected = existing.id
                 try await MacIntegration.openXcode(self.coordinator.projectURL(for: existing))
+                self.activity = "レビュー中のPRをXcodeで開きました。"
                 return
             }
             guard let repo = self.state.repositories.first(where: { $0.slug.lowercased() == pr.slug.lowercased() }) else {
@@ -100,11 +101,11 @@ final class ReviewModel {
         }
     }
     func saveCopies(_ repository: Repository, paths: [String], onError: @escaping (String) -> Void) {
-        launch("コピー設定を確認中…") {
+        launch("コピーするファイルを確認中…") {
             do {
                 _ = try await self.coordinator.configureCopies(repository, paths: paths)
                 self.editingRepository = nil
-                self.activity = "コピー設定を保存しました。次のレビュー環境から適用します。"
+                self.activity = "コピー対象を保存しました。このリポジトリの次のレビューから適用します。"
             } catch { onError(error.localizedDescription) }
         }
     }
@@ -118,7 +119,7 @@ final class ReviewModel {
         launch("変更とローカルコミットを確認中…") {
             let report = try await self.coordinator.inspect(session)
             if report.isEmpty { self.removal = session; self.activity = "削除前の確認が完了しました。" }
-            else { throw ReviewError("環境を残しました。\n\n\(report.description)") }
+            else { throw ReviewError("レビュー環境を削除できません。\n\n\(report.description)") }
         }
     }
     func update(_ session: Session) {
@@ -144,11 +145,14 @@ final class ReviewModel {
     func reloadBuildConfiguration(_ configuration: BuildConfigurationModel) {
         launch("Schemeと実行先を取得中…") {
             await configuration.load()
-            self.activity = "Schemeと実行先を選択してください。"
+            self.activity = configuration.error == nil ? "Schemeと実行先を選択してください。" : "Schemeと実行先を取得できませんでした。"
         }
     }
     func loadDestinations(_ configuration: BuildConfigurationModel) {
-        launch("実行先を取得中…") { await configuration.loadDestinations() }
+        launch("実行先を取得中…") {
+            await configuration.loadDestinations()
+            self.activity = configuration.error == nil ? "実行先を選択してください。" : "実行先を取得できませんでした。"
+        }
     }
     func saveBuildSettings(_ configuration: BuildConfigurationModel) {
         guard !busy else { return }

@@ -67,7 +67,7 @@ extension ReviewService {
     @concurrent
     func checkUpdate(_ session: Session) async throws {
         let reason = try await inspect(session)
-        guard reason.isEmpty else { throw ReviewError("更新せず環境を残しました。\n\n\(reason.description)") }
+        guard reason.isEmpty else { throw ReviewError("レビュー環境を更新できません。\n\n\(reason.description)") }
         let head = try await git(session.path, ["rev-parse", "HEAD"])
         guard head == session.sha else { throw ReviewError("手動で別のコミットへ切り替えられています。更新せず環境を残しました。") }
     }
@@ -152,7 +152,7 @@ extension ReviewService {
                 } catch { restorationFailed = true }
             }
             if restorationFailed {
-                throw ReviewError("環境の削除に失敗しました。復元できなかったコピー設定は次の場所に保管しました：\(backup.path)\n\(originalError.localizedDescription)")
+                throw ReviewError("レビュー環境を削除できませんでした。元の場所に戻せなかったコピー済みファイルは、次のフォルダに保管しています：\n\(backup.path)\n\(originalError.localizedDescription)")
             }
             try? FileManager.default.removeItem(at: backup)
             throw originalError

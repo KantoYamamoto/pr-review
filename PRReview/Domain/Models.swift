@@ -16,13 +16,13 @@ public struct PullRequest: Equatable, Sendable {
         guard let url = URL(string: input.trimmingCharacters(in: .whitespacesAndNewlines)),
               url.scheme == "https", url.host?.lowercased() == "github.com",
               url.user == nil, url.password == nil else {
-            throw ReviewError("GitHubのPR URLを入力してください。https://github.com/owner/repo/pull/123")
+            throw ReviewError("GitHubのPR URLを入力してください。\n例：https://github.com/owner/repo/pull/123")
         }
         let parts = url.path.split(separator: "/").map(String.init)
         guard parts.count >= 4, parts[2] == "pull", let n = Int(parts[3]), n > 0,
               parts[0].range(of: "^[A-Za-z0-9_.-]+$", options: .regularExpression) != nil,
               parts[1].range(of: "^[A-Za-z0-9_.-]+$", options: .regularExpression) != nil else {
-            throw ReviewError("PR URLの形式を確認してください。")
+            throw ReviewError("PR URLの形式を確認してください。\n例：https://github.com/owner/repo/pull/123")
         }
         owner = parts[0]; repository = parts[1]; number = n
     }
@@ -85,13 +85,13 @@ public enum ReviewBlocker: Sendable, Equatable {
     public var description: String {
         switch self {
         case .changedCopy(let path):
-            return "コピーしたファイルが変更されています：\(path)\n必要な内容を元のリポジトリ等へ保存してください。"
+            return "コピーしたファイルが変更されています：\n\(path)\n必要な内容を別の場所に保存し、レビュー環境のファイルをコピー時の内容に戻すか削除してください。"
         case .workingChanges(let paths):
-            return "未コミット／未追跡の変更があります：\n\(paths.joined(separator: "\n").prefix(3000))"
+            return "未コミットの変更や未追跡ファイルがあります：\n\(paths.joined(separator: "\n").prefix(3000))\n必要な内容を別の場所に保存したうえで、変更を取り消し、不要な追加ファイルを削除してください。"
         case .localCommits(let count):
-            return "レビュー中のコミットから追加されたローカルコミットが\(count)件あります。"
+            return "レビュー対象のコミットに含まれないローカルコミットが\(count)件あります。\n必要なコミットを別のブランチなどに残してから、HEADをレビュー対象のコミットに戻してください。"
         case .ignoredFiles(let paths):
-            return "Git管理外（ignored）のファイルがあります：\n\(paths.joined(separator: "\n").prefix(2000))\n必要なファイルを保存するか、不要な生成物を手動で削除してください。"
+            return "Gitのignore設定で除外されたファイルがあります：\n\(paths.joined(separator: "\n").prefix(2000))\n必要なファイルを別の場所に保存してから、一覧のファイルをこのworktreeから削除してください。"
         }
     }
 }
