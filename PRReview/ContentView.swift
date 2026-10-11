@@ -136,7 +136,9 @@ struct SessionDetailView: View {
                         if let name = record.simulatorName { Text(name).font(.caption).textSelection(.enabled) }
                         Text("\(record.sha.prefix(10)) · \(record.date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
                         if record.sha != session.sha { Text("過去のコミットの起動結果です。").font(.caption).foregroundStyle(.orange) }
-                        Text("Xcode 27ではDevice Hubの一覧から上記の端末を選んで画面を開いてください。").font(.caption).foregroundStyle(.secondary)
+                        if record.status == .succeeded {
+                            Text("Xcode 27ではDevice Hubの一覧から上記の端末を選んで画面を開いてください。").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 ForEach((session.buildRecords ?? []).reversed()) { record in
