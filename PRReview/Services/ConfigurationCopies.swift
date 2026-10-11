@@ -32,9 +32,9 @@ extension ReviewService {
     }
     @concurrent
     func requireIgnoredUntracked(_ path: String, root: String) async throws {
-        guard try await git(root, ["ls-files", "-z", "--", path]).isEmpty else { throw ReviewError("Git管理済みファイルはコピー対象にできません：\(path)") }
+        guard try await git(root, ["ls-files", "-z", "--", path]).isEmpty else { throw ReviewError("Gitで管理しているファイルはコピーする必要がありません：\(path)") }
         do { _ = try await git(root, ["check-ignore", "--quiet", "--", path]) }
-        catch { throw ReviewError("コピー対象はGitのignore設定に含めてください：\(path)") }
+        catch { throw ReviewError("Gitのignore設定で除外されているファイルを選んでください：\(path)") }
     }
     @concurrent
     func installCopies(_ copies: [(path: String, data: Data)], at path: String) async throws -> [CopiedFile] {
@@ -42,7 +42,7 @@ extension ReviewService {
         for copy in copies {
             let destination = try RepositoryFileSafety.file(root: path, relative: copy.path)
             guard !FileManager.default.fileExists(atPath: destination.path) else {
-                throw ReviewError("PR内にコピー先が存在します：\(copy.path)")
+                throw ReviewError("PRに同じパスのファイルまたはフォルダがあります。コピー先を確認してください：\(copy.path)")
             }
             try await requireIgnoredUntracked(copy.path, root: path)
         }

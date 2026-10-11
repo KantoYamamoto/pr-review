@@ -25,7 +25,7 @@ enum MacIntegration {
 
     static func chooseCopyFiles(repository: Repository) async -> [URL] {
         let panel = NSOpenPanel()
-        panel.message = "リポジトリ内のignoreされている設定ファイルを選択"
+        panel.message = "リポジトリ内で、Gitのignore設定で除外されているファイルを選択"
         panel.directoryURL = URL(fileURLWithPath: repository.path)
         panel.canChooseFiles = true
         panel.canChooseDirectories = false

@@ -14,8 +14,10 @@ struct CopySettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("レビュー環境にコピーするファイル").font(.title2.bold())
             Text(repository.slug).foregroundStyle(.secondary)
-            Text("GitでignoreされているFirebase設定や.xcconfigを選択します。同じ相対パスへコピーし、変更がなければレビュー終了時に片付けます。設定は新しく作るレビュー環境に適用します。")
-                .font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Firebaseの設定ファイルや.xcconfigなど、レビューに必要なファイルを追加してください。Gitのignore設定で除外されているファイルを選べます。")
+                Text("次に作るレビュー環境の同じ相対パスにコピーします。コピー後に変更がなければ、レビュー終了時に削除します。")
+            }.font(.callout).foregroundStyle(.secondary)
             List {
                 ForEach(paths, id: \.self) { path in
                     HStack {
@@ -26,7 +28,7 @@ struct CopySettingsView: View {
                     }
                 }
             }.disabled(model.busy || choosing)
-                .overlay { if paths.isEmpty { Text("コピー対象は未設定です").foregroundStyle(.secondary) } }
+                .overlay { if paths.isEmpty { Text("コピーするファイルはありません").foregroundStyle(.secondary) } }
             if let error { Text(error).foregroundStyle(.red).font(.caption).textSelection(.enabled) }
             HStack {
                 Button("ファイルを追加…", systemImage: "plus") {
@@ -56,7 +58,7 @@ struct ProjectSelectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("開くXcodeプロジェクトを選択").font(.headline)
-            Text("複数の候補が見つかりました。workspaceは一覧の先頭に表示します。").foregroundStyle(.secondary)
+            Text("複数の候補が見つかりました。レビューで使うプロジェクトまたはworkspaceを選んでください。").foregroundStyle(.secondary)
             List(selection: $selected) {
                 ForEach(selection.entries, id: \.self) { entry in
                     Label(entry, systemImage: entry.hasSuffix(".xcworkspace") ? "square.stack" : "hammer").tag(entry)
@@ -80,23 +82,27 @@ struct BuildSettingsView: View {
     @Bindable var configuration: BuildConfigurationModel
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("ビルド・テストの設定").font(.title2.bold())
-            Text("このレビューと、次に作るレビュー環境の既定値として保存します。").foregroundStyle(.secondary)
+            Text("Schemeと実行先").font(.title2.bold())
+            Text("このレビューに適用します。同じリポジトリの次のレビューにも使います。").foregroundStyle(.secondary)
             Picker("Scheme", selection: Binding(get: { configuration.scheme }, set: {
                 configuration.selectScheme($0)
             })) {
-                if configuration.schemes.isEmpty { Text("Schemeなし").tag("") }
+                if configuration.schemes.isEmpty { Text(model.busy ? "取得中…" : "Schemeがありません").tag("") }
                 ForEach(configuration.schemes, id: \.self) { Text($0).tag($0) }
             }.disabled(model.busy)
             HStack {
                 Picker("実行先", selection: $configuration.destinationID) {
-                    if configuration.destinations.isEmpty { Text("実行先を取得してください").tag("") }
+                    if configuration.destinations.isEmpty { Text(model.busy ? "取得中…" : "実行先を取得してください").tag("") }
                     ForEach(configuration.destinations) { Text($0.label).tag($0.id) }
                 }
                 Button("実行先を取得") { model.loadDestinations(configuration) }.disabled(configuration.scheme.isEmpty || model.busy)
             }.disabled(model.busy)
-            Text("macOSとiOS Simulatorに対応します。「Simulatorで起動」は、選択した端末と同じ機種・OSの専用Simulatorを新規作成・再利用します。実機にはインストールしません。")
-                .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("実行先はMacまたはiOS Simulatorを選べます。テストは選んだ実行先で行います。")
+                if configuration.settings?.destination.platform == "iOS Simulator" {
+                    Text("「Simulatorで起動」は、選んだ端末と同じ機種・OSのレビュー専用端末を使います。このレビューで同じ機種・OSの端末を作成済みなら、端末とデータを再利用します。")
+                }
+            }.font(.caption).foregroundStyle(.secondary)
             if model.busy { ProgressView().controlSize(.small) }
             if let error = configuration.error { ScrollView { Text(error).foregroundStyle(.red).textSelection(.enabled) }.frame(maxHeight: 160) }
             HStack {

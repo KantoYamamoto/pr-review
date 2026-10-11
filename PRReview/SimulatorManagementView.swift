@@ -6,7 +6,7 @@ struct SimulatorManagementView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("レビュー専用Simulator").font(.title2.bold())
-            Text("繰り返し起動すると同じ機種・OSの端末を再利用します。レビュー終了後に残した端末もここで削除できます。削除すると端末内のアプリとデータが失われます。")
+            Text("PR Reviewが作成した端末の一覧です。レビュー終了後に残した端末も、ここから削除できます。")
                 .foregroundStyle(.secondary)
             List(model.state.simulators ?? []) { owned in
                 VStack(alignment: .leading, spacing: 6) {
@@ -16,7 +16,7 @@ struct SimulatorManagementView: View {
                         Button("削除…", role: .destructive) { deleting = owned }.disabled(model.busy)
                     }
                     Text(owned.runtime).font(.caption)
-                    if owned.deviceID == nil { Text("端末の作成・確認が未完了の記録です。").font(.caption).foregroundStyle(.secondary) }
+                    if owned.deviceID == nil { Text("端末の作成が完了したか確認できていません。").font(.caption).foregroundStyle(.secondary) }
                     Text(owned.name).font(.caption.monospaced()).textSelection(.enabled)
                     Text(model.state.sessions.contains { $0.id == owned.sessionID } ? "レビュー中" : "レビュー終了済み")
                         .font(.caption).foregroundStyle(.secondary)
@@ -27,6 +27,8 @@ struct SimulatorManagementView: View {
         }.padding(24).frame(width: 700).interactiveDismissDisabled(model.busy)
             .confirmationDialog("この専用Simulatorとデータを削除しますか？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
                 Button("削除", role: .destructive) { if let owned = deleting { deleting = nil; model.removeSimulator(owned) } }
-            } message: { Text(deleting?.label ?? "") }
+            } message: {
+                Text("\(deleting?.label ?? "")\n\nこの端末にインストールしたアプリとデータも削除されます。")
+            }
     }
 }

@@ -41,8 +41,16 @@ struct ContentView: View {
                 }
                 if let session = model.session { SessionDetailView(model: model, session: session) }
                 else {
-                    ContentUnavailableView("作業を残したまま、PRをレビュー。", systemImage: "arrow.triangle.branch",
-                        description: Text("初回はローカルリポジトリを登録してください。\n別のworktreeを作り、Xcodeで開きます。"))
+                    if model.state.repositories.isEmpty {
+                        ContentUnavailableView("リポジトリを登録", systemImage: "folder.badge.plus",
+                            description: Text("サイドバーの「リポジトリ登録」で、普段使っているローカルリポジトリを選んでください。"))
+                    } else if model.state.sessions.isEmpty {
+                        ContentUnavailableView("PRのURLを入力", systemImage: "arrow.triangle.branch",
+                            description: Text("上の欄にGitHubのPR URLを貼り付け、「レビュー開始」を押してください。\n普段の作業とは別のフォルダで、Xcodeプロジェクトを開きます。"))
+                    } else {
+                        ContentUnavailableView("レビューを選択", systemImage: "sidebar.left",
+                            description: Text("サイドバーから開きたいPRを選んでください。"))
+                    }
                     Spacer()
                 }
                 Divider()
@@ -74,7 +82,7 @@ struct ContentView: View {
         .sheet(item: $model.projectSelection) { ProjectSelectionView(model: model, selection: $0) }
         .sheet(isPresented: $model.managingSimulators) { SimulatorManagementView(model: model) }
         .sheet(item: $model.buildConfiguration) { BuildSettingsView(model: model, configuration: $0) }
-        .alert("確認", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
+        .alert("操作を完了できませんでした", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("閉じる") { model.error = nil }
         } message: { Text(model.error ?? "") }
         .confirmationDialog("レビュー環境を削除しますか？", isPresented: Binding(get: { model.removal != nil }, set: { if !$0 { model.removal = nil } }), titleVisibility: .visible) {
@@ -87,7 +95,11 @@ struct ContentView: View {
                 if let session = model.removal { model.removal = nil; model.remove(session) }
             }
         } message: {
-            Text("このPR用のworktree、未変更のコピー設定、Xcodeの画面状態、専用ビルドデータを削除します。専用Simulatorを削除すると、その端末のアプリとデータも消去します。残した端末は「専用Simulatorの管理…」から削除できます。Xcodeの該当プロジェクトを閉じ、未保存の編集がないことを確認してください。")
+            if (model.state.simulators ?? []).contains(where: { $0.sessionID == model.removal?.id }) {
+                Text("Xcodeで編集を保存し、このプロジェクトを閉じてから終了してください。\n\nこのPR用のworktree、コピーしたファイル、Xcodeの画面状態、ビルドデータを削除します。\n\n専用Simulatorも削除すると、端末内のアプリとデータが消えます。残した端末は「専用Simulatorの管理…」から後で削除できます。")
+            } else {
+                Text("Xcodeで編集を保存し、このプロジェクトを閉じてから終了してください。\n\nこのPR用のworktree、コピーしたファイル、Xcodeの画面状態、ビルドデータを削除します。")
+            }
         }
     }
 }
@@ -103,8 +115,8 @@ struct SessionDetailView: View {
                 Label("レビュー中のコミット: \(session.sha.prefix(10))", systemImage: "point.3.connected.trianglepath.dotted").font(.callout)
                 Text("作成: \(session.createdAt.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
                 if let date = session.updatedAt { Text("最終更新: \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary) }
-                if !(session.copiedFiles ?? []).isEmpty { Text("コピーした設定: \(session.copiedFiles?.count ?? 0)ファイル").font(.caption).foregroundStyle(.secondary) }
-                Text("更新・終了前にXcodeの該当プロジェクトを閉じてください。未保存の編集は検出できません。")
+                if !(session.copiedFiles ?? []).isEmpty { Text("コピーしたファイル: \(session.copiedFiles?.count ?? 0)件").font(.caption).foregroundStyle(.secondary) }
+                Text("更新やレビュー終了の前に、Xcodeで編集を保存し、このプロジェクトを閉じてください。未保存の編集は検出できません。")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider()
                 HStack {
@@ -122,8 +134,10 @@ struct SessionDetailView: View {
                         }
                     }.disabled(model.busy)
                 } else { Text("「設定…」でSchemeと実行先を選択してください。").foregroundStyle(.secondary) }
-                Text("選択したPRのビルドスクリプトを実行します。依存関係の準備・プロジェクト生成が必要な場合は先にXcode等で行ってください。")
-                    .font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("このPRに含まれるビルドスクリプトも実行されます。")
+                    Text("依存関係のインストールやプロジェクト生成が必要な場合は、先にレビュー環境で済ませてください。")
+                }.font(.caption).foregroundStyle(.secondary)
                 if model.runningBuild == session.id {
                     HStack { ProgressView().controlSize(.small); Text("実行中…"); Spacer(); Button("中断") { model.cancelBuild() } }
                     Text(model.liveLog.isEmpty ? "ログを待っています…" : model.liveLog)
@@ -137,7 +151,7 @@ struct SessionDetailView: View {
                         Text("\(record.sha.prefix(10)) · \(record.date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
                         if record.sha != session.sha { Text("過去のコミットの起動結果です。").font(.caption).foregroundStyle(.orange) }
                         if record.status == .succeeded {
-                            Text("Xcode 27ではDevice Hubの一覧から上記の端末を選んで画面を開いてください。").font(.caption).foregroundStyle(.secondary)
+                            Text("Xcode 27では、Device Hubで上の端末名を選ぶと画面を開けます。").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -147,13 +161,13 @@ struct SessionDetailView: View {
                             Label("\(record.action.label)：\(record.status.label)", systemImage: record.status == .succeeded ? "checkmark.circle" : "exclamationmark.circle")
                             Spacer()
                             Button("ログ") { model.openArtifact(record.logPath, session: session) }
-                            if let path = record.resultPath { Button("テスト結果") { model.openArtifact(path, session: session) } }
+                            if let path = record.resultPath { Button("Xcodeで結果を開く") { model.openArtifact(path, session: session) } }
                         }
                         Text("\(record.sha.prefix(10)) · \(record.configuration.scheme) · \(record.configuration.destination.label)")
                             .font(.caption).foregroundStyle(.secondary)
                         Text(record.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
                         if record.sha != session.sha { Text("過去のコミットの結果です。").font(.caption).foregroundStyle(.orange) }
-                        if record.sourceModified { Text("実行中に変更が検出されたため、コミットの確認結果として扱えません。").font(.caption).foregroundStyle(.orange) }
+                        if record.sourceModified { Text("実行後のソースがこのコミットと一致することを確認できませんでした。レビュー環境の変更を確認してから、もう一度実行してください。").font(.caption).foregroundStyle(.orange) }
                     }.padding(.vertical, 8)
                 }
                 Divider()
